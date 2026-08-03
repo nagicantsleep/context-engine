@@ -2,16 +2,17 @@ pub mod chunker;
 pub mod generated;
 pub mod relations;
 pub mod symbols;
+pub mod taint;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use tracing::warn;
 use tree_sitter::{Node, Parser};
 
 use crate::parsing::chunker::{Chunk, chunk_file, chunk_file_ast};
-use crate::parsing::relations::{EdgeKind, EdgeTarget, RawEdge};
+use crate::parsing::relations::{Confidence, EdgeKind, EdgeTarget, RawEdge};
 use crate::parsing::symbols::{QualifiedSymbol, Symbol, SymbolKind};
 
 // ─── Recursion depth guard ───────────────────────────────────────────────────
@@ -500,6 +501,159 @@ fn extract_python(
     (symbols, edges)
 }
 
+fn collect_param_forward_edges_python<'a>(
+    _file: &str,
+    source: &str,
+    node: &Node<'a>,
+    param_names: &HashSet<&str>,
+    from_sym: &QualifiedSymbol,
+    edges: &mut Vec<RawEdge>,
+) {
+    if node.kind() == "call" {
+        if let Some(func_node) = node.child_by_field_name("function") {
+            let callee_name = node_text(&func_node, source).to_string();
+            if let Some(args_node) = node.child_by_field_name("arguments") {
+                let mut acursor = args_node.walk();
+                let forwards_param = args_node.children(&mut acursor).any(|child| {
+                    child.kind() == "identifier" && param_names.contains(node_text(&child, source))
+                });
+                if forwards_param {
+                    edges.push(RawEdge {
+                        from: from_sym.clone(),
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::DataFlowsTo,
+                        line: node_line_start(node),
+                        confidence: Confidence::Inferred(0.75),
+                    });
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_param_forward_edges_python(_file, source, &child, param_names, from_sym, edges);
+    }
+}
+
+fn scan_calls_python(
+    source: &str,
+    node: &Node,
+    var_map: &std::collections::HashMap<String, (String, usize)>,
+    from_sym: &QualifiedSymbol,
+    edges: &mut Vec<RawEdge>,
+) {
+    if node.kind() == "call" {
+        if let Some(func_node) = node.child_by_field_name("function") {
+            let callee = node_text(&func_node, source).to_string();
+            if let Some(args_node) = node.child_by_field_name("arguments") {
+                let mut acursor = args_node.walk();
+                for arg in args_node.children(&mut acursor) {
+                    if arg.kind() == "identifier" {
+                        let arg_name = node_text(&arg, source);
+                        if var_map.contains_key(arg_name) {
+                            let line = node_line_start(node);
+                            edges.push(RawEdge {
+                                from: from_sym.clone(),
+                                to: EdgeTarget::Unresolved {
+                                    name: callee.clone(),
+                                    import_path: None,
+                                    qualifier: None,
+                                },
+                                kind: EdgeKind::DataFlowsTo,
+                                line,
+                                confidence: Confidence::Inferred(0.6),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            scan_calls_python(source, &child, var_map, from_sym, edges);
+        }
+    }
+}
+
+fn collect_intermediate_flow_edges_python<'a>(
+    _file: &str,
+    source: &str,
+    node: &Node<'a>,
+    from_sym: &QualifiedSymbol,
+    edges: &mut Vec<RawEdge>,
+) {
+    let mut var_map: std::collections::HashMap<String, (String, usize)> =
+        std::collections::HashMap::new();
+
+    let mut cursor = node.walk();
+    for stmt in node.children(&mut cursor) {
+        // In tree-sitter-python the body block may yield `expression_statement` wrappers
+        // around `assignment` nodes rather than bare `assignment` nodes.  Unwrap one level
+        // so both representations are handled.
+        let assign_node = if stmt.kind() == "expression_statement" {
+            stmt.child(0).filter(|c| c.kind() == "assignment")
+        } else if stmt.kind() == "assignment" {
+            Some(stmt)
+        } else {
+            None
+        };
+
+        if let Some(ref asgn) = assign_node {
+            let var_name = asgn
+                .child_by_field_name("left")
+                .filter(|p| p.kind() == "identifier")
+                .as_ref()
+                .map(|p| node_text(p, source).to_string());
+            let rhs_callee = asgn
+                .child_by_field_name("right")
+                .filter(|v| v.kind() == "call")
+                .and_then(|v| v.child_by_field_name("function"))
+                .map(|f| node_text(&f, source).to_string());
+
+            if let (Some(var), Some(callee)) = (var_name, rhs_callee) {
+                let mut chain_depth = 1usize;
+                if let Some(rhs_node) = asgn.child_by_field_name("right") {
+                    if let Some(args_node) = rhs_node.child_by_field_name("arguments") {
+                        let mut acursor = args_node.walk();
+                        for arg in args_node.children(&mut acursor) {
+                            if arg.kind() == "identifier" {
+                                let arg_name = node_text(&arg, source);
+                                if let Some((_src_callee, depth)) = var_map.get(arg_name) {
+                                    let line = node_line_start(&rhs_node);
+                                    edges.push(RawEdge {
+                                        from: from_sym.clone(),
+                                        to: EdgeTarget::Unresolved {
+                                            name: callee.clone(),
+                                            import_path: None,
+                                            qualifier: None,
+                                        },
+                                        kind: EdgeKind::DataFlowsTo,
+                                        line,
+                                        confidence: Confidence::Inferred(0.6),
+                                    });
+                                    chain_depth = depth + 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if chain_depth <= 3 {
+                    var_map.insert(var, (callee, chain_depth));
+                }
+            }
+        } else {
+            scan_calls_python(source, &stmt, &var_map, from_sym, edges);
+        }
+    }
+}
+
 fn extract_python_node(
     file: &str,
     source: &str,
@@ -533,7 +687,45 @@ fn extract_python_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params_node) = node.child_by_field_name("parameters") {
+                    let mut pcursor = params_node.walk();
+                    for param in params_node.children(&mut pcursor) {
+                        match param.kind() {
+                            "identifier" => {
+                                param_names.insert(node_text(&param, source));
+                            }
+                            "typed_parameter" | "default_parameter" => {
+                                if let Some(name_node) = param.child_by_field_name("name") {
+                                    if name_node.kind() == "identifier" {
+                                        param_names.insert(node_text(&name_node, source));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !param_names.is_empty() {
+                    if let Some(body_node) = node.child_by_field_name("body") {
+                        collect_param_forward_edges_python(
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    collect_intermediate_flow_edges_python(
+                        file, source, &body_node, &func_sym, edges,
+                    );
+                }
 
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
@@ -588,15 +780,24 @@ fn extract_python_node(
                 let callee_name = node_text(&func_node, source).to_string();
                 if let Some(from_sym) = scope_to_qualified(file, scope) {
                     edges.push(RawEdge {
-                        from: from_sym,
+                        from: from_sym.clone(),
                         to: EdgeTarget::Unresolved {
-                            name: callee_name,
+                            name: callee_name.clone(),
                             import_path: None,
                             qualifier: None,
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
+                    if let Some(taint_edge) = crate::parsing::taint::emit_taint_edge(
+                        &from_sym,
+                        &callee_name,
+                        crate::parsing::taint::Lang::Python,
+                        node_line_start(node),
+                    ) {
+                        edges.push(taint_edge);
+                    }
                 }
                 let mut cursor = node.walk();
                 for child in node.children(&mut cursor) {
@@ -607,6 +808,31 @@ fn extract_python_node(
                 for child in node.children(&mut cursor) {
                     extract_python_node(file, source, &child, scope, parent_fqn, symbols, edges);
                 }
+            }
+        }
+        "return_statement" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "call" {
+                    if let Some(func_node) = child.child_by_field_name("function") {
+                        let callee_name = node_text(&func_node, source).to_string();
+                        if let Some(from_sym) = scope_to_qualified(file, scope) {
+                            edges.push(RawEdge {
+                                from: from_sym,
+                                to: EdgeTarget::Unresolved {
+                                    name: callee_name,
+                                    import_path: None,
+                                    qualifier: None,
+                                },
+                                kind: EdgeKind::DataFlowsTo,
+                                line: node_line_start(&child),
+                                confidence: Confidence::Extracted,
+                            });
+                        }
+                    }
+                }
+                // Recurse so the call child also emits its Calls edge.
+                extract_python_node(file, source, &child, scope, parent_fqn, symbols, edges);
             }
         }
         _ => {
@@ -728,17 +954,44 @@ fn extract_js_node(
                 let callee_name = node_text(&func_node, source).to_string();
                 if let Some(from_sym) = scope_to_qualified(file, scope) {
                     edges.push(RawEdge {
-                        from: from_sym,
+                        from: from_sym.clone(),
                         to: EdgeTarget::Unresolved {
-                            name: callee_name,
+                            name: callee_name.clone(),
                             import_path: None,
                             qualifier: None,
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
+                    if let Some(taint_edge) = crate::parsing::taint::emit_taint_edge(
+                        &from_sym,
+                        &callee_name,
+                        crate::parsing::taint::Lang::Js,
+                        node_line_start(node),
+                    ) {
+                        edges.push(taint_edge);
+                    }
                 }
             }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                extract_js_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        "member_expression" => {
+            // Check for JS taint sources expressed as property accesses (req.body, etc.)
+            let member_text = node_text(&node, source).to_string();
+            if let Some(from_sym) = scope_to_qualified(file, scope) {
+                if let Some(taint_edge) = crate::parsing::taint::emit_js_member_taint_edge(
+                    &from_sym,
+                    &member_text,
+                    node_line_start(node),
+                ) {
+                    edges.push(taint_edge);
+                }
+            }
+            // Recurse into children
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 extract_js_node(file, source, &child, scope, parent_fqn, symbols, edges);
@@ -774,6 +1027,147 @@ fn extract_rust(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symb
     (symbols, edges)
 }
 
+fn collect_param_forward_edges_rust<'a>(
+    _file: &str,
+    source: &str,
+    node: &Node<'a>,
+    param_names: &HashSet<&str>,
+    from_sym: &QualifiedSymbol,
+    edges: &mut Vec<RawEdge>,
+) {
+    if node.kind() == "call_expression" {
+        if let Some(func_node) = node.child_by_field_name("function") {
+            let callee_name = node_text(&func_node, source).to_string();
+            if let Some(args_node) = node.child_by_field_name("arguments") {
+                let mut acursor = args_node.walk();
+                let forwards_param = args_node.children(&mut acursor).any(|child| {
+                    child.kind() == "identifier" && param_names.contains(node_text(&child, source))
+                });
+                if forwards_param {
+                    edges.push(RawEdge {
+                        from: from_sym.clone(),
+                        to: EdgeTarget::Unresolved {
+                            name: callee_name,
+                            import_path: None,
+                            qualifier: None,
+                        },
+                        kind: EdgeKind::DataFlowsTo,
+                        line: node_line_start(node),
+                        confidence: Confidence::Inferred(0.75),
+                    });
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_param_forward_edges_rust(_file, source, &child, param_names, from_sym, edges);
+    }
+}
+
+fn scan_calls_rust(
+    source: &str,
+    node: &Node,
+    var_map: &std::collections::HashMap<String, (String, usize)>,
+    from_sym: &QualifiedSymbol,
+    edges: &mut Vec<RawEdge>,
+) {
+    if node.kind() == "call_expression" {
+        if let Some(func_node) = node.child_by_field_name("function") {
+            let callee = node_text(&func_node, source).to_string();
+            if let Some(args_node) = node.child_by_field_name("arguments") {
+                let mut acursor = args_node.walk();
+                for arg in args_node.children(&mut acursor) {
+                    if arg.kind() == "identifier" {
+                        let arg_name = node_text(&arg, source);
+                        if var_map.contains_key(arg_name) {
+                            let line = node_line_start(node);
+                            edges.push(RawEdge {
+                                from: from_sym.clone(),
+                                to: EdgeTarget::Unresolved {
+                                    name: callee.clone(),
+                                    import_path: None,
+                                    qualifier: None,
+                                },
+                                kind: EdgeKind::DataFlowsTo,
+                                line,
+                                confidence: Confidence::Inferred(0.6),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            scan_calls_rust(source, &child, var_map, from_sym, edges);
+        }
+    }
+}
+
+fn collect_intermediate_flow_edges_rust<'a>(
+    _file: &str,
+    source: &str,
+    node: &Node<'a>,
+    from_sym: &QualifiedSymbol,
+    edges: &mut Vec<RawEdge>,
+) {
+    let mut var_map: std::collections::HashMap<String, (String, usize)> =
+        std::collections::HashMap::new();
+
+    let mut cursor = node.walk();
+    for stmt in node.children(&mut cursor) {
+        if stmt.kind() == "let_declaration" {
+            let var_name = stmt
+                .child_by_field_name("pattern")
+                .filter(|p| p.kind() == "identifier")
+                .map(|p| node_text(&p, source).to_string());
+            let rhs_callee = stmt
+                .child_by_field_name("value")
+                .filter(|v| v.kind() == "call_expression")
+                .and_then(|v| v.child_by_field_name("function"))
+                .map(|f| node_text(&f, source).to_string());
+
+            if let (Some(var), Some(callee)) = (var_name, rhs_callee) {
+                let mut chain_depth = 1usize;
+                if let Some(value_node) = stmt.child_by_field_name("value") {
+                    if let Some(args_node) = value_node.child_by_field_name("arguments") {
+                        let mut acursor = args_node.walk();
+                        for arg in args_node.children(&mut acursor) {
+                            if arg.kind() == "identifier" {
+                                let arg_name = node_text(&arg, source);
+                                if let Some((_src_callee, depth)) = var_map.get(arg_name) {
+                                    let line = node_line_start(&value_node);
+                                    edges.push(RawEdge {
+                                        from: from_sym.clone(),
+                                        to: EdgeTarget::Unresolved {
+                                            name: callee.clone(),
+                                            import_path: None,
+                                            qualifier: None,
+                                        },
+                                        kind: EdgeKind::DataFlowsTo,
+                                        line,
+                                        confidence: Confidence::Inferred(0.6),
+                                    });
+                                    chain_depth = depth + 1;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if chain_depth <= 3 {
+                    var_map.insert(var, (callee, chain_depth));
+                }
+            }
+        } else {
+            scan_calls_rust(source, &stmt, &var_map, from_sym, edges);
+        }
+    }
+}
+
 fn extract_rust_node(
     file: &str,
     source: &str,
@@ -807,7 +1201,38 @@ fn extract_rust_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params_node) = node.child_by_field_name("parameters") {
+                    let mut pcursor = params_node.walk();
+                    for param in params_node.children(&mut pcursor) {
+                        if param.kind() == "parameter" {
+                            if let Some(pat) = param.child_by_field_name("pattern") {
+                                if pat.kind() == "identifier" {
+                                    param_names.insert(node_text(&pat, source));
+                                }
+                            }
+                        }
+                    }
+                }
+                if !param_names.is_empty() {
+                    if let Some(body_node) = node.child_by_field_name("body") {
+                        collect_param_forward_edges_rust(
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    collect_intermediate_flow_edges_rust(
+                        file, source, &body_node, &func_sym, edges,
+                    );
+                }
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor = node.walk();
@@ -940,19 +1365,53 @@ fn extract_rust_node(
                 let callee_name = node_text(&func_node, source).to_string();
                 if let Some(from_sym) = scope_to_qualified(file, scope) {
                     edges.push(RawEdge {
-                        from: from_sym,
+                        from: from_sym.clone(),
                         to: EdgeTarget::Unresolved {
-                            name: callee_name,
+                            name: callee_name.clone(),
                             import_path: None,
                             qualifier: None,
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
+                    if let Some(taint_edge) = crate::parsing::taint::emit_taint_edge(
+                        &from_sym,
+                        &callee_name,
+                        crate::parsing::taint::Lang::Rust,
+                        node_line_start(node),
+                    ) {
+                        edges.push(taint_edge);
+                    }
                 }
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
+                extract_rust_node(file, source, &child, scope, parent_fqn, symbols, edges);
+            }
+        }
+        "return_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "call_expression" {
+                    if let Some(func_node) = child.child_by_field_name("function") {
+                        let callee_name = node_text(&func_node, source).to_string();
+                        if let Some(from_sym) = scope_to_qualified(file, scope) {
+                            edges.push(RawEdge {
+                                from: from_sym,
+                                to: EdgeTarget::Unresolved {
+                                    name: callee_name,
+                                    import_path: None,
+                                    qualifier: None,
+                                },
+                                kind: EdgeKind::DataFlowsTo,
+                                line: node_line_start(&child),
+                                confidence: Confidence::Extracted,
+                            });
+                        }
+                    }
+                }
+                // Recurse so the call_expression child also emits its Calls edge.
                 extract_rust_node(file, source, &child, scope, parent_fqn, symbols, edges);
             }
         }
@@ -1060,6 +1519,7 @@ fn extract_go_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -1181,6 +1641,7 @@ fn extract_java_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -1650,6 +2111,7 @@ fn extract_c_cpp_node(
                     },
                     kind: EdgeKind::Calls,
                     line: node_line_start(node),
+                    confidence: Confidence::Extracted,
                 });
             }
             let mut cursor = node.walk();
@@ -1902,6 +2364,7 @@ fn extract_csharp_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -2147,6 +2610,7 @@ fn extract_php_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -2168,6 +2632,7 @@ fn extract_php_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -2189,6 +2654,7 @@ fn extract_php_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -2341,6 +2807,7 @@ fn extract_ruby_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -2562,6 +3029,7 @@ fn extract_objc_node(
                     },
                     kind: EdgeKind::Calls,
                     line: node_line_start(node),
+                    confidence: Confidence::Extracted,
                 });
             }
             let mut cursor = node.walk();
@@ -2745,6 +3213,7 @@ fn extract_swift_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -2938,6 +3407,7 @@ fn extract_kotlin_node(
                     },
                     kind: EdgeKind::Calls,
                     line: node_line_start(node),
+                    confidence: Confidence::Extracted,
                 });
             }
             let mut cursor2 = node.walk();
@@ -3190,6 +3660,7 @@ fn extract_dart_node(
                     },
                     kind: EdgeKind::Calls,
                     line: node_line_start(node),
+                    confidence: Confidence::Extracted,
                 });
             }
             let mut cursor2 = node.walk();
@@ -3216,6 +3687,7 @@ fn extract_dart_node(
                     },
                     kind: EdgeKind::Calls,
                     line: node_line_start(node),
+                    confidence: Confidence::Extracted,
                 });
             }
             let mut cursor = node.walk();
@@ -3317,6 +3789,7 @@ fn extract_lua_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -3439,6 +3912,7 @@ fn extract_luau_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -3588,6 +4062,7 @@ fn extract_pascal_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -3787,6 +4262,7 @@ fn extract_liquid_node(
                         },
                         kind: EdgeKind::Calls,
                         line: node_line_start(node),
+                        confidence: Confidence::Extracted,
                     });
                 }
             }
@@ -4798,6 +5274,291 @@ mod recursion_guard_tests {
         assert!(
             g.is_some(),
             "after begin_file, depth should be 0 and guard should succeed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rust_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_single_param() {
+        let src = "fn outer(x: i32) { inner(x); }";
+        let result = parse_file("test.rs", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn forwards_two_params_to_different_calls() {
+        let src = "fn outer(x: i32, y: String) { inner(x); process(y); }";
+        let result = parse_file("test.rs", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 2);
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = "fn outer(x: i32) { inner(42); }";
+        let result = parse_file("test.rs", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod python_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_single_param() {
+        let src = "def outer(x):\n    inner(x)\n";
+        let result = parse_file("test.py", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = "def outer(x):\n    inner(42)\n";
+        let result = parse_file("test.py", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod rust_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn simple_let_binding() {
+        let src = "fn f() { let x = foo(); bar(x); }";
+        let result = parse_file("test.rs", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn no_edge_for_literal_let() {
+        let src = "fn f() { let x = 42; bar(x); }";
+        let result = parse_file("test.rs", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(
+            df.is_empty(),
+            "expected no DataFlowsTo edge, got {:?}",
+            df.len()
+        );
+    }
+
+    #[test]
+    fn no_edge_undeclared_var() {
+        let src = "fn f() { bar(x); }";
+        let result = parse_file("test.rs", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod python_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn simple_assignment() {
+        let src = "def f():\n    x = foo()\n    bar(x)\n";
+        let result = parse_file("test.py", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge");
+    }
+
+    #[test]
+    fn no_edge_for_literal() {
+        let src = "def f():\n    x = 42\n    bar(x)\n";
+        let result = parse_file("test.py", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod rust_return_flow_tests {
+    use super::*;
+
+    #[test]
+    fn return_call_emits_dataflow() {
+        let src = "fn outer() -> i32 { return inner(); }";
+        let result = parse_file("test.rs", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(
+            !df.is_empty(),
+            "expected DataFlowsTo edge from return inner()"
+        );
+        // Verify confidence is Extracted (not Inferred)
+        let confidences: Vec<_> = df.iter().map(|e| &e.confidence).collect();
+        assert!(
+            confidences
+                .iter()
+                .any(|c| matches!(c, Confidence::Extracted)),
+            "return-expression should use Confidence::Extracted, got {:?}",
+            confidences
+        );
+    }
+
+    #[test]
+    fn return_without_call_emits_nothing() {
+        let src = "fn f() -> i32 { return 42; }";
+        let result = parse_file("test.rs", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(
+            df.is_empty(),
+            "return of literal should not emit DataFlowsTo"
+        );
+    }
+
+    #[test]
+    fn implicit_return_emits_dataflow() {
+        let src = "fn outer() -> i32 { inner() }";
+        let result = parse_file("test.rs", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        // Rust implicit return is NOT a return_expression node — it's just a call_expression
+        // at the end of a block. The current implementation does NOT detect this pattern.
+        // This test documents the known gap.
+        assert!(
+            df.is_empty(),
+            "implicit return not yet supported (known gap)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod python_return_flow_tests {
+    use super::*;
+
+    #[test]
+    fn return_call_emits_dataflow() {
+        let src = "def outer():\n    return inner()\n";
+        let result = parse_file("test.py", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(
+            !df.is_empty(),
+            "expected DataFlowsTo edge from return inner()"
+        );
+        let confidences: Vec<_> = df.iter().map(|e| &e.confidence).collect();
+        assert!(
+            confidences
+                .iter()
+                .any(|c| matches!(c, Confidence::Extracted)),
+            "return-statement should use Confidence::Extracted"
+        );
+    }
+
+    #[test]
+    fn return_literal_emits_nothing() {
+        let src = "def f():\n    return 42\n";
+        let result = parse_file("test.py", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df.is_empty());
+    }
+
+    #[test]
+    fn return_with_taint_source() {
+        let src = "def handler():\n    return input()\n";
+        let result = parse_file("test.py", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        // Should have TWO DataFlowsTo edges:
+        // 1. return input() → DataFlowsTo to "input" (return-statement arm)
+        // 2. input() → taint:source:user_input (taint arm)
+        assert!(
+            df.len() >= 2,
+            "expected return-flow + taint edge, got {}",
+            df.len()
         );
     }
 }

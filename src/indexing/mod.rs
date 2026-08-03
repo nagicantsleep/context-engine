@@ -1402,6 +1402,7 @@ async fn run_consumer(
             .with_ignore_filenames(settings_ref.index_ignore_filenames.clone())
             .with_ignore_paths(per_repo_ignored_paths)
             .with_data_dir(engine_ref.data_dir.clone())
+            .with_repo_dbs(engine_ref.repo_dbs.clone())
         };
 
         let pipeline_run_start = Instant::now();

@@ -85,6 +85,8 @@ DEFINE FIELD OVERWRITE in_file  ON calls TYPE string;
 DEFINE FIELD OVERWRITE out_file ON calls TYPE string;
 DEFINE FIELD OVERWRITE in_name  ON calls TYPE option<string>;
 DEFINE FIELD OVERWRITE out_name ON calls TYPE option<string>;
+DEFINE FIELD OVERWRITE confidence ON calls TYPE option<float>;
+DEFINE FIELD OVERWRITE flow_type ON calls TYPE option<string>;
 -- NOTE: idx_calls_in_file / idx_calls_out_file / idx_calls_in_name / idx_calls_out_name
 -- are NOT defined here — they are built by store::ensure_secondary_indexes
 -- (CONCURRENTLY). A crash mid-Phase-2 leaves calls rows present with these indexes
@@ -143,5 +145,7 @@ DEFINE FIELD OVERWRITE to_name      ON raw_edge TYPE string;
 DEFINE FIELD OVERWRITE kind         ON raw_edge TYPE string;
 DEFINE FIELD OVERWRITE line         ON raw_edge TYPE int;
 DEFINE FIELD OVERWRITE import_path  ON raw_edge TYPE option<string>;
+DEFINE FIELD OVERWRITE confidence   ON raw_edge TYPE option<float>;
+DEFINE FIELD OVERWRITE flow_type    ON raw_edge TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS idx_raw_edge_from_file ON raw_edge FIELDS from_file;
 "#;

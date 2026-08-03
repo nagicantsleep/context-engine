@@ -7,10 +7,18 @@
 //! files belonging to that framework.
 
 pub mod django;
+pub mod expo;
 pub mod express;
+pub mod fastapi;
+pub mod flutter;
 pub mod go_gin;
+pub mod java_kotlin;
+pub mod laravel;
+pub mod nestjs;
+pub mod rails;
 pub mod react;
 pub mod spring;
+pub mod swift_objc;
 
 use std::collections::HashSet;
 
@@ -61,6 +69,14 @@ impl FrameworkRegistry {
             Box::new(django::DjangoResolver),
             Box::new(spring::SpringResolver),
             Box::new(go_gin::GoGinResolver),
+            Box::new(fastapi::FastApiResolver),
+            Box::new(laravel::LaravelResolver),
+            Box::new(nestjs::NestJsResolver),
+            Box::new(rails::RailsResolver),
+            Box::new(expo::ExpoResolver),
+            Box::new(flutter::FlutterResolver),
+            Box::new(java_kotlin::JavaKotlinResolver),
+            Box::new(swift_objc::SwiftObjcResolver),
         ];
         Self {
             resolvers,

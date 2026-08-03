@@ -8,7 +8,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 use crate::indexing::frameworks::{DetectionContext, FrameworkResolver};
-use crate::parsing::relations::{EdgeKind, EdgeTarget, RawEdge};
+use crate::parsing::relations::{Confidence, EdgeKind, EdgeTarget, RawEdge};
 use crate::parsing::symbols::{QualifiedSymbol, Symbol};
 
 pub struct ReactResolver;
@@ -85,6 +85,7 @@ impl FrameworkResolver for ReactResolver {
                 },
                 kind: EdgeKind::Calls,
                 line,
+                confidence: Confidence::Extracted,
             });
         }
 

@@ -82,14 +82,16 @@ pub async fn graph_expand(
     let mut fetch_calls: u64 = 0; // # of fetch_chunk_for_fqn calls
 
     let mut all_expanded: Vec<ExpandedChunk> = Vec::new();
-    let mut global_seen: HashSet<String> = HashSet::new();
+    let mut expanded_index: HashMap<String, usize> = HashMap::new();
+    let mut best_result_score: HashMap<String, f32> = HashMap::new();
+    let mut best_state_score: HashMap<(String, usize), f32> = HashMap::new();
 
     let base_keys: HashSet<(String, u32, u32)> = base_chunks
         .iter()
         .map(|c| (c.file.clone(), c.line_start, c.line_end))
         .collect();
 
-    'outer: for base_chunk in base_chunks {
+    for base_chunk in base_chunks {
         let db = match find_db_for_file(db_map, &base_chunk.file) {
             Some(db) => db,
             None => continue,
@@ -121,37 +123,77 @@ pub async fn graph_expand(
             .iter()
             .map(|s| (strip_id_brackets(&s.fqn), base_chunk.score, 0))
             .collect();
+        for (fqn, score, depth) in &queue {
+            best_state_score
+                .entry((fqn.clone(), *depth))
+                .and_modify(|best| *best = best.max(*score))
+                .or_insert(*score);
+        }
         queue_max = queue_max.max(queue.len());
 
         while let Some((fqn, score, depth)) = queue.pop() {
             nodes_popped += 1;
-            if depth >= MAX_DEPTH {
+            // A stronger path may have reached this endpoint after this frontier
+            // entry was queued. Skip stale work; the stronger entry is also queued.
+            if best_state_score
+                .get(&(fqn.clone(), depth))
+                .is_some_and(|best| score < *best)
+            {
                 continue;
             }
-            if all_expanded.len() >= MAX_BONUS_CHUNKS {
-                break 'outer;
+            if depth >= MAX_DEPTH {
+                continue;
             }
 
             // Expand callers.
             let caller_score = score * CALLER_SCORE_FACTOR;
             if caller_score >= SCORE_FLOOR {
                 callers_queries += 1;
-                let callers = query_callers(db, &fqn, schema_version)
+                let callers = query_callers(db_map, &fqn, schema_version)
                     .await
                     .unwrap_or_default();
-                for caller_fqn in callers {
-                    if global_seen.contains(&caller_fqn) {
+                for (caller_fqn, caller_file, edge_confidence) in callers {
+                    let confidence_multiplier = edge_confidence.unwrap_or(1.0);
+                    let caller_score = score * CALLER_SCORE_FACTOR * confidence_multiplier;
+                    let next_depth = depth + 1;
+                    if caller_score < SCORE_FLOOR
+                        || best_state_score
+                            .get(&(caller_fqn.clone(), next_depth))
+                            .is_some_and(|best| caller_score <= *best)
+                    {
                         continue;
                     }
-                    global_seen.insert(caller_fqn.clone());
+                    let Some(endpoint_db) = find_db_for_file(db_map, &caller_file) else {
+                        continue;
+                    };
                     fetch_calls += 1;
                     if let Some(chunk) =
-                        fetch_chunk_for_fqn(db, &caller_fqn, caller_score, &base_keys).await
+                        fetch_chunk_for_fqn(endpoint_db, &caller_fqn, caller_score, &base_keys)
+                            .await
                     {
-                        if all_expanded.len() < MAX_BONUS_CHUNKS {
-                            all_expanded.push(chunk);
+                        // Preserve the result cap: once full, an unseen endpoint
+                        // cannot be returned or improve an existing result, so do not
+                        // broaden traversal through it. Existing endpoints may still be
+                        // replaced and requeued when a stronger path arrives.
+                        if !expanded_index.contains_key(&caller_fqn)
+                            && all_expanded.len() >= MAX_BONUS_CHUNKS
+                        {
+                            continue;
                         }
-                        queue.push((caller_fqn, caller_score, depth + 1));
+                        best_state_score.insert((caller_fqn.clone(), next_depth), caller_score);
+                        let improves_result = best_result_score
+                            .get(&caller_fqn)
+                            .is_none_or(|best| caller_score > *best);
+                        if improves_result {
+                            best_result_score.insert(caller_fqn.clone(), caller_score);
+                            if let Some(&index) = expanded_index.get(&caller_fqn) {
+                                all_expanded[index] = chunk;
+                            } else {
+                                expanded_index.insert(caller_fqn.clone(), all_expanded.len());
+                                all_expanded.push(chunk);
+                            }
+                        }
+                        queue.push((caller_fqn, caller_score, next_depth));
                         queue_max = queue_max.max(queue.len());
                     }
                 }
@@ -161,22 +203,51 @@ pub async fn graph_expand(
             let callee_score = score * CALLEE_SCORE_FACTOR;
             if callee_score >= SCORE_FLOOR {
                 callees_queries += 1;
-                let callees = query_callees(db, &fqn, schema_version)
+                let callees = query_callees(db_map, &fqn, schema_version)
                     .await
                     .unwrap_or_default();
-                for callee_fqn in callees {
-                    if global_seen.contains(&callee_fqn) {
+                for (callee_fqn, callee_file, edge_confidence) in callees {
+                    let confidence_multiplier = edge_confidence.unwrap_or(1.0);
+                    let callee_score = score * CALLEE_SCORE_FACTOR * confidence_multiplier;
+                    let next_depth = depth + 1;
+                    if callee_score < SCORE_FLOOR
+                        || best_state_score
+                            .get(&(callee_fqn.clone(), next_depth))
+                            .is_some_and(|best| callee_score <= *best)
+                    {
                         continue;
                     }
-                    global_seen.insert(callee_fqn.clone());
+                    let Some(endpoint_db) = find_db_for_file(db_map, &callee_file) else {
+                        continue;
+                    };
                     fetch_calls += 1;
                     if let Some(chunk) =
-                        fetch_chunk_for_fqn(db, &callee_fqn, callee_score, &base_keys).await
+                        fetch_chunk_for_fqn(endpoint_db, &callee_fqn, callee_score, &base_keys)
+                            .await
                     {
-                        if all_expanded.len() < MAX_BONUS_CHUNKS {
-                            all_expanded.push(chunk);
+                        // Preserve the result cap: once full, an unseen endpoint
+                        // cannot be returned or improve an existing result, so do not
+                        // broaden traversal through it. Existing endpoints may still be
+                        // replaced and requeued when a stronger path arrives.
+                        if !expanded_index.contains_key(&callee_fqn)
+                            && all_expanded.len() >= MAX_BONUS_CHUNKS
+                        {
+                            continue;
                         }
-                        queue.push((callee_fqn, callee_score, depth + 1));
+                        best_state_score.insert((callee_fqn.clone(), next_depth), callee_score);
+                        let improves_result = best_result_score
+                            .get(&callee_fqn)
+                            .is_none_or(|best| callee_score > *best);
+                        if improves_result {
+                            best_result_score.insert(callee_fqn.clone(), callee_score);
+                            if let Some(&index) = expanded_index.get(&callee_fqn) {
+                                all_expanded[index] = chunk;
+                            } else {
+                                expanded_index.insert(callee_fqn.clone(), all_expanded.len());
+                                all_expanded.push(chunk);
+                            }
+                        }
+                        queue.push((callee_fqn, callee_score, next_depth));
                         queue_max = queue_max.max(queue.len());
                     }
                 }
@@ -246,75 +317,124 @@ async fn query_overlapping_symbols(
 /// the v1 link-deref fallback is no longer accurate since in_name/out_name
 /// now store FQNs (v2+ schema). For v1 DBs the fallback path is kept
 /// for graceful degradation.
-async fn query_callers(db: &Surreal<Db>, fqn: &str, schema_version: u32) -> Result<Vec<String>> {
+async fn query_callers(
+    db_map: &HashMap<String, Surreal<Db>>,
+    fqn: &str,
+    schema_version: u32,
+) -> Result<Vec<(String, String, Option<f32>)>> {
     #[derive(Deserialize)]
     struct Row {
         in_name: String,
+        in_file: String,
+        #[serde(default)]
+        confidence: Option<f32>,
     }
 
-    let rows: Vec<Row> = if schema_version >= 2 {
-        // Fast path: query by full FQN — in_name now stores FQN, indexed by idx_calls_in_name.
-        db.query("SELECT in_name FROM calls WHERE out_name = $fqn LIMIT 20")
-            .bind(("fqn", fqn.to_string()))
-            .await?
-            .take(0)?
-    } else {
-        // Slow fallback for v1 DBs (link-deref on the `in` record).
-        let name = fqn.rsplit("::").next().unwrap_or(fqn);
-        #[derive(Deserialize)]
-        struct V1Row {
-            in_file: String,
+    let mut best: HashMap<(String, String), Option<f32>> = HashMap::new();
+    for db in db_map.values() {
+        let rows: Vec<Row> = if schema_version >= 2 {
+            db.query("SELECT in_name, in_file, confidence FROM calls WHERE out_name = $fqn")
+                .bind(("fqn", fqn.to_string()))
+                .await?
+                .take(0)?
+        } else {
+            let name = fqn.rsplit("::").next().unwrap_or(fqn);
+            #[derive(Deserialize)]
+            struct V1Row {
+                in_file: String,
+            }
+            let v1_rows: Vec<V1Row> = db
+                .query("SELECT in_file FROM calls WHERE out.name = $name LIMIT 20")
+                .bind(("name", name.to_string()))
+                .await?
+                .take(0)?;
+            for row in v1_rows {
+                best.entry((format!("{}::{}", row.in_file, name), row.in_file))
+                    .or_insert(None);
+            }
+            continue;
+        };
+        for row in rows {
+            merge_endpoint_confidence(&mut best, row.in_name, row.in_file, row.confidence);
         }
-        let v1_rows: Vec<V1Row> = db
-            .query("SELECT in_file FROM calls WHERE out.name = $name LIMIT 20")
-            .bind(("name", name.to_string()))
-            .await?
-            .take(0)?;
-        return Ok(v1_rows
-            .into_iter()
-            .map(|r| format!("{}::{}", r.in_file, name))
-            .collect());
-    };
-
-    let callers: Vec<String> = rows.into_iter().map(|r| r.in_name).collect();
+    }
+    let mut callers: Vec<_> = best
+        .into_iter()
+        .map(|((fqn, file), confidence)| (fqn, file, confidence))
+        .collect();
+    callers.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    callers.truncate(20);
     Ok(callers)
 }
 
-/// Query callees of the symbol identified by `fqn`.
-///
-/// Uses indexed `in_name`/`out_name` columns which now store full FQNs.
-async fn query_callees(db: &Surreal<Db>, fqn: &str, schema_version: u32) -> Result<Vec<String>> {
+/// Query callees across all caller databases. Cross-repo edges live in the
+/// caller's DB, so looking only in the endpoint DB loses valid edges.
+async fn query_callees(
+    db_map: &HashMap<String, Surreal<Db>>,
+    fqn: &str,
+    schema_version: u32,
+) -> Result<Vec<(String, String, Option<f32>)>> {
     #[derive(Deserialize)]
     struct Row {
         out_name: String,
+        out_file: String,
+        #[serde(default)]
+        confidence: Option<f32>,
     }
 
-    let rows: Vec<Row> = if schema_version >= 2 {
-        // Fast path: query by full FQN — out_name now stores FQN, indexed by idx_calls_out_name.
-        db.query("SELECT out_name FROM calls WHERE in_name = $fqn LIMIT 20")
-            .bind(("fqn", fqn.to_string()))
-            .await?
-            .take(0)?
-    } else {
-        // Slow fallback for v1 DBs (link-deref on the `out` record).
-        let name = fqn.rsplit("::").next().unwrap_or(fqn);
-        #[derive(Deserialize)]
-        struct V1Row {
-            out_file: String,
+    let mut best: HashMap<(String, String), Option<f32>> = HashMap::new();
+    for db in db_map.values() {
+        let rows: Vec<Row> = if schema_version >= 2 {
+            db.query("SELECT out_name, out_file, confidence FROM calls WHERE in_name = $fqn")
+                .bind(("fqn", fqn.to_string()))
+                .await?
+                .take(0)?
+        } else {
+            let name = fqn.rsplit("::").next().unwrap_or(fqn);
+            #[derive(Deserialize)]
+            struct V1Row {
+                out_file: String,
+            }
+            let v1_rows: Vec<V1Row> = db
+                .query("SELECT out_file FROM calls WHERE in.name = $name LIMIT 20")
+                .bind(("name", name.to_string()))
+                .await?
+                .take(0)?;
+            for row in v1_rows {
+                best.entry((format!("{}::{}", row.out_file, name), row.out_file))
+                    .or_insert(None);
+            }
+            continue;
+        };
+        for row in rows {
+            merge_endpoint_confidence(&mut best, row.out_name, row.out_file, row.confidence);
         }
-        let v1_rows: Vec<V1Row> = db
-            .query("SELECT out_file FROM calls WHERE in.name = $name LIMIT 20")
-            .bind(("name", name.to_string()))
-            .await?
-            .take(0)?;
-        return Ok(v1_rows
-            .into_iter()
-            .map(|r| format!("{}::{}", r.out_file, name))
-            .collect());
-    };
-
-    let callees: Vec<String> = rows.into_iter().map(|r| r.out_name).collect();
+    }
+    let mut callees: Vec<_> = best
+        .into_iter()
+        .map(|((fqn, file), confidence)| (fqn, file, confidence))
+        .collect();
+    callees.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    callees.truncate(20);
     Ok(callees)
+}
+
+/// Keep the strongest duplicate edge. `None` means parser-extracted and has
+/// multiplier 1.0, so it outranks inferred confidence below 1.0.
+fn merge_endpoint_confidence(
+    best: &mut HashMap<(String, String), Option<f32>>,
+    fqn: String,
+    file: String,
+    confidence: Option<f32>,
+) {
+    let new_weight = confidence.unwrap_or(1.0);
+    best.entry((fqn, file))
+        .and_modify(|current| {
+            if new_weight > current.unwrap_or(1.0) {
+                *current = confidence;
+            }
+        })
+        .or_insert(confidence);
 }
 
 async fn fetch_chunk_for_fqn(
@@ -488,6 +608,265 @@ mod tests {
         assert!(
             got.is_none(),
             "chunk already present in base_keys must be deduped (None)"
+        );
+    }
+
+    /// Extracted edge must score higher than an Inferred(0.5) edge from the same seed.
+    /// Locks the BFS confidence-multiplier behaviour:
+    ///   score * CALLEE_SCORE_FACTOR * 1.0  >  score * CALLEE_SCORE_FACTOR * 0.5
+    #[tokio::test]
+    async fn bfs_weights_inferred_edges_lower_than_extracted() {
+        let home = TempDir::new().unwrap();
+        let db = open_db(home.path(), "/test/bfs_confidence", 0)
+            .await
+            .unwrap();
+
+        // Seed symbol overlaps with the base chunk we pass to graph_expand.
+        insert_symbol(&db, "/seed.rs::seed_fn", "/seed.rs", "seed_fn", 1, 10).await;
+
+        // Callee A — extracted (confidence NULL)
+        insert_symbol(&db, "/a.rs::a_fn", "/a.rs", "a_fn", 1, 10).await;
+        insert_chunk(&db, "/a.rs", 1, 10, "fn a_fn() {}").await;
+
+        // Callee B — inferred confidence 0.5
+        insert_symbol(&db, "/b.rs::b_fn", "/b.rs", "b_fn", 1, 10).await;
+        insert_chunk(&db, "/b.rs", 1, 10, "fn b_fn() {}").await;
+
+        // Extracted edge seed_fn → a_fn (confidence absent = NULL = Extracted)
+        db.query(
+            "INSERT INTO calls { \
+               in_name: '/seed.rs::seed_fn', out_name: '/a.rs::a_fn', \
+               line: 5, in_file: '/seed.rs', out_file: '/a.rs', \
+               in: (SELECT VALUE id FROM symbol WHERE meta::id(id) = '/seed.rs::seed_fn' LIMIT 1)[0], \
+               out: (SELECT VALUE id FROM symbol WHERE meta::id(id) = '/a.rs::a_fn' LIMIT 1)[0] \
+             }",
+        )
+        .await
+        .expect("insert extracted call");
+
+        // Inferred edge seed_fn → b_fn (confidence 0.5)
+        db.query(
+            "INSERT INTO calls { \
+               in_name: '/seed.rs::seed_fn', out_name: '/b.rs::b_fn', \
+               line: 6, in_file: '/seed.rs', out_file: '/b.rs', \
+               in: (SELECT VALUE id FROM symbol WHERE meta::id(id) = '/seed.rs::seed_fn' LIMIT 1)[0], \
+               out: (SELECT VALUE id FROM symbol WHERE meta::id(id) = '/b.rs::b_fn' LIMIT 1)[0], \
+               confidence: 0.5 \
+             }",
+        )
+        .await
+        .expect("insert inferred call");
+
+        let seed_chunk = MergeChunk {
+            file: "/seed.rs".to_string(),
+            line_start: 1,
+            line_end: 10,
+            score: 1.0,
+            content: "fn seed_fn() {}".to_string(),
+            symbol: None,
+            symbol_fqn: None,
+            symbol_kind: None,
+        };
+
+        let mut db_map = HashMap::new();
+        db_map.insert("/test/bfs_confidence".to_string(), db);
+
+        // schema_version=2: uses the fast indexed path for callers/callees.
+        let expanded = graph_expand(&[seed_chunk], &db_map, 2).await;
+
+        let a_score = expanded.iter().find(|c| c.file == "/a.rs").map(|c| c.score);
+        let b_score = expanded.iter().find(|c| c.file == "/b.rs").map(|c| c.score);
+
+        assert!(
+            a_score.is_some(),
+            "extracted callee must appear in expansion"
+        );
+        assert!(
+            b_score.is_some(),
+            "inferred callee must appear in expansion"
+        );
+        assert!(
+            a_score.unwrap() > b_score.unwrap(),
+            "extracted edge (mult 1.0) must score higher than inferred edge (mult 0.5): \
+             a={:?} b={:?}",
+            a_score,
+            b_score
+        );
+    }
+
+    async fn insert_call(
+        db: &Surreal<Db>,
+        from_fqn: &str,
+        from_file: &str,
+        to_fqn: &str,
+        to_file: &str,
+        confidence: Option<f32>,
+    ) {
+        db.query(
+            "INSERT INTO calls { in_name: $from, out_name: $to, in_file: $from_file, \
+             out_file: $to_file, line: 1, confidence: $confidence }",
+        )
+        .bind(("from", from_fqn.to_string()))
+        .bind(("to", to_fqn.to_string()))
+        .bind(("from_file", from_file.to_string()))
+        .bind(("to_file", to_file.to_string()))
+        .bind(("confidence", confidence))
+        .await
+        .expect("insert call")
+        .check()
+        .expect("insert call statement");
+    }
+
+    #[tokio::test]
+    async fn cross_repo_callee_is_fetched_from_owning_db() {
+        let home = TempDir::new().unwrap();
+        let db_a = open_db(home.path(), "/repo/a", 0).await.unwrap();
+        let db_b = open_db(home.path(), "/repo/b", 0).await.unwrap();
+        let a_file = "/repo/a/a.rs";
+        let b_file = "/repo/b/b.rs";
+        let a_fqn = "/repo/a/a.rs::a";
+        let b_fqn = "/repo/b/b.rs::b";
+        insert_symbol(&db_a, a_fqn, a_file, "a", 1, 5).await;
+        insert_symbol(&db_b, b_fqn, b_file, "b", 1, 5).await;
+        insert_chunk(&db_b, b_file, 1, 5, "fn b() {}").await;
+        insert_call(&db_a, a_fqn, a_file, b_fqn, b_file, None).await;
+
+        let base = MergeChunk {
+            file: a_file.into(),
+            line_start: 1,
+            line_end: 5,
+            score: 1.0,
+            content: "fn a() {}".into(),
+            symbol: None,
+            symbol_fqn: None,
+            symbol_kind: None,
+        };
+        let db_map = HashMap::from([("/repo/a".to_string(), db_a), ("/repo/b".to_string(), db_b)]);
+        let expanded = graph_expand(&[base], &db_map, 2).await;
+        assert!(
+            expanded
+                .iter()
+                .any(|c| c.file == b_file && c.symbol_fqn.as_deref() == Some(b_fqn))
+        );
+    }
+
+    async fn duplicate_confidence_result(order: &[Option<f32>]) -> Vec<(String, f32)> {
+        let home = TempDir::new().unwrap();
+        let db = open_db(home.path(), "/repo/weighted", 0).await.unwrap();
+        let seed_file = "/repo/weighted/seed.rs";
+        let target_file = "/repo/weighted/target.rs";
+        let low_file = "/repo/weighted/low.rs";
+        let seed_fqn = "/repo/weighted/seed.rs::seed";
+        let target_fqn = "/repo/weighted/target.rs::target";
+        let low_fqn = "/repo/weighted/low.rs::low";
+        insert_symbol(&db, seed_fqn, seed_file, "seed", 1, 5).await;
+        insert_symbol(&db, target_fqn, target_file, "target", 1, 5).await;
+        insert_symbol(&db, low_fqn, low_file, "low", 1, 5).await;
+        insert_chunk(&db, target_file, 1, 5, "fn target() {}").await;
+        insert_chunk(&db, low_file, 1, 5, "fn low() {}").await;
+        for confidence in order {
+            insert_call(
+                &db,
+                seed_fqn,
+                seed_file,
+                target_fqn,
+                target_file,
+                *confidence,
+            )
+            .await;
+        }
+        insert_call(&db, seed_fqn, seed_file, low_fqn, low_file, Some(0.2)).await;
+        let base = MergeChunk {
+            file: seed_file.into(),
+            line_start: 1,
+            line_end: 5,
+            score: 1.0,
+            content: "fn seed() {}".into(),
+            symbol: None,
+            symbol_fqn: None,
+            symbol_kind: None,
+        };
+        let db_map = HashMap::from([("/repo/weighted".to_string(), db)]);
+        let mut result: Vec<_> = graph_expand(&[base], &db_map, 2)
+            .await
+            .into_iter()
+            .map(|c| (c.file, c.score))
+            .collect();
+        result.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+
+    async fn duplicate_endpoint_best_path_result(seed_order: &[(&str, f32)]) -> ExpandedChunk {
+        let home = TempDir::new().unwrap();
+        let db = open_db(home.path(), "/repo/best_path", 0).await.unwrap();
+        let a_file = "/repo/best_path/a.rs";
+        let b_file = "/repo/best_path/b.rs";
+        let target_file = "/repo/best_path/target.rs";
+        let a_fqn = "/repo/best_path/a.rs::a";
+        let b_fqn = "/repo/best_path/b.rs::b";
+        let target_fqn = "/repo/best_path/target.rs::target";
+        insert_symbol(&db, a_fqn, a_file, "a", 1, 5).await;
+        insert_symbol(&db, b_fqn, b_file, "b", 1, 5).await;
+        insert_symbol(&db, target_fqn, target_file, "target", 1, 5).await;
+        insert_chunk(&db, target_file, 1, 5, "fn target() {}").await;
+        insert_call(&db, a_fqn, a_file, target_fqn, target_file, None).await;
+        insert_call(&db, b_fqn, b_file, target_fqn, target_file, None).await;
+
+        let bases: Vec<MergeChunk> = seed_order
+            .iter()
+            .map(|(file, score)| MergeChunk {
+                file: (*file).to_string(),
+                line_start: 1,
+                line_end: 5,
+                score: *score,
+                content: format!("fn {}() {{}}", if *file == a_file { "a" } else { "b" }),
+                symbol: None,
+                symbol_fqn: None,
+                symbol_kind: None,
+            })
+            .collect();
+        let db_map = HashMap::from([("/repo/best_path".to_string(), db)]);
+        let mut targets: Vec<_> = graph_expand(&bases, &db_map, 2)
+            .await
+            .into_iter()
+            .filter(|chunk| chunk.symbol_fqn.as_deref() == Some(target_fqn))
+            .collect();
+        assert_eq!(targets.len(), 1, "duplicate endpoint must be returned once");
+        targets.pop().unwrap()
+    }
+
+    #[tokio::test]
+    async fn duplicate_endpoint_keeps_highest_score_path_independent_of_seed_order() {
+        // A(.5) -> T yields .25; B(.4) -> T yields .20. The old LIFO +
+        // first-seen traversal let B claim T first when A preceded B in the seed
+        // list and permanently discarded A's stronger path.
+        let a_file = "/repo/best_path/a.rs";
+        let b_file = "/repo/best_path/b.rs";
+        for order in [
+            vec![(a_file, 0.5), (b_file, 0.4)],
+            vec![(b_file, 0.4), (a_file, 0.5)],
+        ] {
+            let target = duplicate_endpoint_best_path_result(&order).await;
+            assert!(
+                (target.score - 0.25).abs() < f32::EPSILON,
+                "score={}",
+                target.score
+            );
+            assert_eq!(
+                target.symbol_fqn.as_deref(),
+                Some("/repo/best_path/target.rs::target")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_edges_use_best_confidence_independent_of_insertion_order() {
+        let inferred_first = duplicate_confidence_result(&[Some(0.2), None]).await;
+        let extracted_first = duplicate_confidence_result(&[None, Some(0.2)]).await;
+        assert_eq!(inferred_first, extracted_first);
+        assert_eq!(
+            inferred_first,
+            vec![("/repo/weighted/target.rs".to_string(), 0.5)]
         );
     }
 }

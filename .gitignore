@@ -1,1 +1,7 @@
 /target
+
+# Harness core maintenance binary
+scripts/bin/harness
+scripts/bin/harness.exe
+
+.agents/skills/onboard-repository/scripts/__pycache__/

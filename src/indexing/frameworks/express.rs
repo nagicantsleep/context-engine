@@ -8,7 +8,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 use crate::indexing::frameworks::{DetectionContext, FrameworkResolver};
-use crate::parsing::relations::{EdgeKind, EdgeTarget, RawEdge};
+use crate::parsing::relations::{Confidence, EdgeKind, EdgeTarget, RawEdge};
 use crate::parsing::symbols::{QualifiedSymbol, Symbol};
 
 pub struct ExpressResolver;
@@ -75,6 +75,7 @@ impl FrameworkResolver for ExpressResolver {
                 },
                 kind: EdgeKind::Calls,
                 line,
+                confidence: Confidence::Extracted,
             });
         }
 
@@ -97,6 +98,7 @@ impl FrameworkResolver for ExpressResolver {
                 },
                 kind: EdgeKind::Calls,
                 line,
+                confidence: Confidence::Extracted,
             });
         }
 

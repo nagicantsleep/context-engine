@@ -25,13 +25,13 @@ use crate::indexing::events::{IndexEvent, IndexEventBus};
 use crate::indexing::tracker::{ChangeKind, FileChange, stat_file};
 use crate::indexing::walker::{ChangeFilter, walk_repo_with};
 use crate::parsing::parse_file;
-use crate::parsing::relations::{EdgeKind, EdgeTarget};
+use crate::parsing::relations::{Confidence, EdgeKind, EdgeTarget};
 use crate::parsing::symbols::Symbol;
-use crate::store::build_index_concurrently;
 use crate::store::ops::{
     FileMeta, SymbolWithPos, delete_all_data, delete_files_data_incremental,
-    find_symbols_by_names_with_pos, get_all_file_meta, get_meta, set_meta, upsert_file_meta,
+    find_symbols_by_names_with_pos_multi, get_all_file_meta, get_meta, set_meta, upsert_file_meta,
 };
+use crate::store::{RepoDbMap, build_index_concurrently};
 use crate::vector::{ChunkId, ShardedVectorIndex};
 
 /// Batch size for DB writes — keeps per-query payload small and avoids the
@@ -111,6 +111,8 @@ struct RawEdgeRecord {
     kind: String,
     line: i64,
     import_path: Option<String>,
+    confidence: Option<f32>,
+    flow_type: Option<String>,
 }
 
 /// Output of parse_one_file — either a successfully parsed file or a skip record.
@@ -319,7 +321,7 @@ const EDGES_RESOLVED_KEY: &str = "edges_resolved";
 
 /// A row fetched from `raw_edge` during Phase 2 edge resolution.
 /// Shared by both full-build and incremental Phase 2 paths.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct RawEdgeRow {
     id_str: String,
     from_file: String,
@@ -331,6 +333,10 @@ struct RawEdgeRow {
     kind: String,
     line: i64,
     import_path: Option<String>,
+    #[serde(default)]
+    confidence: Option<f32>,
+    #[serde(default)]
+    flow_type: Option<String>,
 }
 
 /// Resolve a page of raw edges into the edge accumulator.
@@ -342,19 +348,55 @@ struct RawEdgeRow {
 /// 4. For each raw edge, select best candidate and push resolved edge
 /// 5. Flush to DB when accumulator reaches WRITE_BATCH_SIZE
 async fn resolve_raw_edge_page(
-    db: &Surreal<Db>,
+    dbs: &[Surreal<Db>],
     batch: &[RawEdgeRow],
-    edge_batch: &mut Vec<(String, String, i64, String, String, String, String)>,
+    edge_batch: &mut Vec<(
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        Option<f32>,
+        Option<String>,
+    )>,
     label: &str,
 ) -> Result<()> {
+    // Short-circuit: taint sentinel edges bypass symbol resolution
+    let taint_rows: Vec<_> = batch
+        .iter()
+        .filter(|r| r.to_name.starts_with("taint:"))
+        .cloned()
+        .collect();
+    let regular_rows: Vec<_> = batch
+        .iter()
+        .filter(|r| !r.to_name.starts_with("taint:"))
+        .cloned()
+        .collect();
+
+    for row in &taint_rows {
+        edge_batch.push((
+            row.from_fqn.clone(),
+            row.to_name.clone(),
+            row.line,
+            row.from_file.clone(),
+            String::new(),
+            row.from_fqn.clone(),
+            row.to_name.clone(),
+            row.confidence,
+            row.flow_type.clone(),
+        ));
+    }
+
     let to_names: Vec<String> = {
-        let mut names: Vec<String> = batch.iter().map(|r| r.to_name.clone()).collect();
+        let mut names: Vec<String> = regular_rows.iter().map(|r| r.to_name.clone()).collect();
         names.sort_unstable();
         names.dedup();
         names
     };
 
-    let sym_rows = find_symbols_by_names_with_pos(db, &to_names).await?;
+    let sym_rows = find_symbols_by_names_with_pos_multi(dbs, &to_names).await?;
 
     let mut name_bucket: HashMap<String, Vec<SymbolWithPos>> = HashMap::new();
     for s in sym_rows {
@@ -369,7 +411,7 @@ async fn resolve_raw_edge_page(
         });
     }
 
-    for row in batch {
+    for row in &regular_rows {
         let resolved_to = match name_bucket.get(&row.to_name) {
             Some(candidates) if !candidates.is_empty() => IndexPipeline::select_best_candidate(
                 candidates,
@@ -392,10 +434,12 @@ async fn resolve_raw_edge_page(
                 to.file.clone(),
                 row.from_fqn.clone(),
                 to.fqn.clone(),
+                row.confidence,
+                row.flow_type.clone(),
             ));
 
             if edge_batch.len() >= WRITE_BATCH_SIZE {
-                flush_edge_batch(db, edge_batch)
+                flush_edge_batch(&dbs[0], edge_batch)
                     .await
                     .context(format!("{}: flush edge batch", label))?;
                 edge_batch.clear();
@@ -427,6 +471,9 @@ pub struct IndexPipeline {
     /// Explicit test-only escape hatch for parser/graph tests that intentionally
     /// exercise unembedded DB mutations. Production constructors leave this false.
     allow_no_client_mutation: bool,
+    /// Optional map of all open repo DBs for cross-repo symbol resolution.
+    /// When set, Phase 2 fans out symbol lookups to all loaded repos.
+    repo_dbs: Option<RepoDbMap>,
 }
 
 impl IndexPipeline {
@@ -451,7 +498,13 @@ impl IndexPipeline {
             ignore_paths: HashSet::new(),
             data_dir: None,
             allow_no_client_mutation: false,
+            repo_dbs: None,
         }
+    }
+
+    pub fn with_repo_dbs(mut self, dbs: RepoDbMap) -> Self {
+        self.repo_dbs = Some(dbs);
+        self
     }
 
     /// Set the data dir so vector-changing operations invalidate the persisted
@@ -858,6 +911,10 @@ impl IndexPipeline {
                 key_hints,
                 cancel_token.as_ref(),
                 run_identity_key.as_deref(),
+                &stored_meta
+                    .iter()
+                    .map(|m| m.path.clone())
+                    .collect::<Vec<_>>(),
             )
             .await?;
 
@@ -1036,6 +1093,7 @@ impl IndexPipeline {
                 key_hints,
                 true,
                 cancel_token,
+                None,
             )
             .await
             .context("full_rebuild: streaming_index")?;
@@ -1130,13 +1188,17 @@ impl IndexPipeline {
         key_hints: &[String],
         cancel_token: Option<&CancellationToken>,
         identity_key: Option<&str>,
+        repository_files: &[String],
     ) -> Result<(IncrementalRunStats, u64)> {
         let pre_publish_generation = self.data_dir.as_ref().and_then(|data_dir| {
             let root = crate::vector::shard_file::repo_shard_root(data_dir, &self.repo);
             crate::vector::shard_file::read_current_gen(&root)
         });
         let mut run_stats = IncrementalRunStats::default();
-        let to_process: Vec<String> = changes
+        let framework_identity_changed = changes
+            .iter()
+            .any(|change| is_framework_identity_file(&change.path));
+        let mut to_process: Vec<String> = changes
             .iter()
             .filter(|c| c.kind != ChangeKind::Deleted)
             .map(|c| c.path.clone())
@@ -1147,8 +1209,25 @@ impl IndexPipeline {
             .map(|c| c.path.clone())
             .collect();
 
-        let all_affected: Vec<String> =
+        // Framework-derived raw edges belong to source files, but whether they
+        // exist can be controlled solely by a manifest. Reparse only source kinds
+        // whose framework identity can be changed by the touched manifest; ordinary
+        // incremental edits remain restricted to their explicit change batch.
+        if framework_identity_changed {
+            to_process.extend(
+                repository_files
+                    .iter()
+                    .filter(|file| is_framework_affected_source(file, &changes))
+                    .cloned(),
+            );
+            to_process.sort_unstable();
+            to_process.dedup();
+        }
+
+        let mut all_affected: Vec<String> =
             to_delete.iter().chain(to_process.iter()).cloned().collect();
+        all_affected.sort_unstable();
+        all_affected.dedup();
 
         // ── Capture the OLD symbol surface of the modified files BEFORE deleting ──
         // their symbols. The surface is the set of (leaf_name, fqn) pairs each file
@@ -1185,7 +1264,20 @@ impl IndexPipeline {
             .context("incremental_run: delete_files_data_incremental")?;
         run_stats.delete_bulk_ms = delete_bulk_start.elapsed().as_millis() as u64;
 
-        // Stream parse → embed → write.
+        // Stream parse → embed → write. Framework detection needs repository
+        // context even though parsing remains restricted to the changed batch.
+        // Start from the already-loaded file_meta inventory (no watcher-path walk),
+        // remove deletions, and include newly-added files not present in file_meta yet.
+        let deleted_set: HashSet<&str> = to_delete.iter().map(String::as_str).collect();
+        let mut framework_files: Vec<String> = repository_files
+            .iter()
+            .filter(|file| !deleted_set.contains(file.as_str()))
+            .cloned()
+            .collect();
+        framework_files.extend(to_process.iter().cloned());
+        framework_files.sort_unstable();
+        framework_files.dedup();
+
         // Raw edges go to DB (crash-safe incremental path).
         let streaming_start = Instant::now();
         let (chunk_vectors, _stage_stats, _ram_edges, _overflowed, _ram_symbols) = self
@@ -1197,6 +1289,7 @@ impl IndexPipeline {
                 key_hints,
                 false,
                 cancel_token,
+                Some(&framework_files),
             )
             .await
             .context("incremental_run: streaming_index")?;
@@ -1259,29 +1352,9 @@ impl IndexPipeline {
         // `calls` table (the incremental delete left `calls` untouched). Skipped
         // entirely when nothing was removed — the common comment/add-symbol cases.
         let predelete_start = Instant::now();
-        let dir1_callers: Vec<String> = if delta.removed_surface_files.is_empty() {
-            Vec::new()
-        } else {
-            #[derive(Deserialize)]
-            struct CallerRow {
-                in_file: String,
-            }
-            let rows_result: Result<Vec<CallerRow>> = async {
-                db.query(
-                    "SELECT in_file FROM calls \
-                     WHERE out_file IN $changed AND in_file NOT IN $affected \
-                     GROUP BY in_file",
-                )
-                .bind(("changed", delta.removed_surface_files.clone()))
-                .bind(("affected", all_affected.clone()))
-                .await
-                .context("incremental_run: direction-1 caller query")?
-                .take(0)
-                .context("incremental_run: decode direction-1 callers")
-            }
-            .await;
-            let rows = match rows_result {
-                Ok(rows) => rows,
+        let dir1_callers =
+            match query_direction1_callers(db, &delta.removed_surface_files, &all_affected).await {
+                Ok(callers) => callers,
                 Err(e) => {
                     if let Some(key) = identity_key {
                         self.rollback_published_vectors(
@@ -1295,8 +1368,6 @@ impl IndexPipeline {
                     return Err(e);
                 }
             };
-            rows.into_iter().map(|r| r.in_file).collect()
-        };
         run_stats.predelete_callers_ms = predelete_start.elapsed().as_millis() as u64;
 
         // Phase 2: resolve only edges in the gated blast radius —
@@ -1314,9 +1385,14 @@ impl IndexPipeline {
         }
         let phase2_start = Instant::now();
         let phase2_result = self
-            .resolve_edges_incremental(db, &all_affected, &dir1_callers, &delta.added_names)
-            .await
-            .context("incremental_run: resolve_edges_incremental");
+            .resolve_edges_incremental_all_dbs(
+                db,
+                &all_affected,
+                &dir1_callers,
+                &delta.removed_surface_files,
+                &delta.added_names,
+            )
+            .await;
         let phase2_stats = match phase2_result {
             Ok(stats) => stats,
             Err(e) => {
@@ -1373,6 +1449,7 @@ impl IndexPipeline {
         key_hints: &[String],
         is_full_rebuild: bool,
         cancel_token: Option<&CancellationToken>,
+        framework_detection_files: Option<&[String]>,
     ) -> Result<(
         Vec<(ChunkId, Vec<f32>)>,
         IndexPipelineStats,
@@ -1400,11 +1477,15 @@ impl IndexPipeline {
         let key_hints_owned: Vec<String> = key_hints.to_vec();
 
         // ── Framework detection (once per run) ───────────────────────────────
-        // Build a file set from the files being indexed to detect active frameworks.
+        // Detection is repository-scoped, not change-batch-scoped. During an
+        // incremental controller-only edit the manifest is absent from `files`, but
+        // framework-derived raw edges for that controller are deleted and rebuilt.
+        // Re-walk the repository so manifest-dependent resolvers stay active.
         let framework_registry = {
             use crate::indexing::frameworks::{DetectionContext, FrameworkRegistry};
             let mut registry = FrameworkRegistry::new();
-            let file_set: HashSet<String> = files.iter().cloned().collect();
+            let detection_files = framework_detection_files.unwrap_or(files);
+            let file_set: HashSet<String> = detection_files.iter().cloned().collect();
             let ctx = DetectionContext {
                 file_set: &file_set,
                 read_file: &|path: &str| std::fs::read_to_string(path).ok(),
@@ -2416,6 +2497,41 @@ impl IndexPipeline {
     /// the index seek and achieves O(N) total.
     ///
     /// Writes the `edges_resolved` marker in `index_meta` only after all pages commit.
+
+    /// Take a non-blocking snapshot of all open repo DBs. The caller's `db` is
+    /// always first (index 0) — flush_edge_batch always uses dbs[0].
+    /// IMPORTANT: the read-lock is acquired, all handles are cloned, then the
+    /// lock is dropped before returning — never hold the lock across an .await.
+    async fn collect_db_snapshot(&self, primary: &Surreal<Db>) -> Vec<Surreal<Db>> {
+        let mut snapshot = vec![primary.clone()];
+        if let Some(repo_dbs) = &self.repo_dbs {
+            let map = repo_dbs.read().await;
+            for db in map.values() {
+                snapshot.push(db.clone());
+            }
+            // map (read guard) is dropped here before any subsequent .await
+        }
+        // Deduplicate: the primary DB may also be in repo_dbs.
+        // Since Surreal<Db> doesn't implement Eq, dedup by pointer identity is
+        // not straightforward — just keep all (duplicate queries are idempotent).
+        snapshot
+    }
+
+    /// Snapshot loaded DBs other than this pipeline's owning repo. Repository
+    /// keys, unlike Surreal handles, are comparable, so this avoids processing the
+    /// primary DB twice while dropping the shared-map lock before any DB await.
+    async fn collect_foreign_db_snapshot(&self) -> Vec<Surreal<Db>> {
+        let Some(repo_dbs) = &self.repo_dbs else {
+            return Vec::new();
+        };
+        let own_repo = crate::store::normalize_repo_path(&self.repo);
+        let map = repo_dbs.read().await;
+        map.iter()
+            .filter(|(repo, _)| crate::store::normalize_repo_path(repo) != own_repo)
+            .map(|(_, db)| db.clone())
+            .collect()
+    }
+
     async fn resolve_edges_phase2(
         &self,
         db: &Surreal<Db>,
@@ -2459,7 +2575,7 @@ impl IndexPipeline {
         // This avoids per-page round-trips to the DB for symbol resolution.
         // Memory: 27K symbols × ~120 bytes = ~3.3 MB — bounded and safe.
         let t_sym_load = Instant::now();
-        let all_symbols = load_all_symbols(db)
+        let all_symbols = load_all_symbols_multi(&self.collect_db_snapshot(db).await)
             .await
             .context("phase2: load all symbols")?;
         p2.sym_load_ms = t_sym_load.elapsed().as_millis() as u64;
@@ -2468,7 +2584,7 @@ impl IndexPipeline {
         // Build a name → Vec<SymbolWithPos> lookup map for O(1) resolution.
         let t_bucket = Instant::now();
         let mut name_bucket: HashMap<String, Vec<SymbolWithPos>> = HashMap::new();
-        for s in all_symbols {
+        for s in all_symbols.into_values() {
             name_bucket.entry(s.name.clone()).or_default().push(s);
         }
         // Pre-sort each bucket for deterministic tie-breaking (file, line_start, line_end).
@@ -2525,7 +2641,17 @@ impl IndexPipeline {
 
         let t_load_start = Instant::now();
         let mut last_file = String::new();
-        let mut edge_batch: Vec<(String, String, i64, String, String, String, String)> = Vec::new();
+        let mut edge_batch: Vec<(
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Option<f32>,
+            Option<String>,
+        )> = Vec::new();
         let mut pages_processed: u64 = 0;
         let mut scan_ms_total: u64 = 0;
         // Throttled progress: count raw_edge rows scanned (numerator over `total`).
@@ -2584,7 +2710,8 @@ impl IndexPipeline {
             let batch: Vec<RawEdgeRow> = db
                 .query(
                     "SELECT type::string(id) AS id_str, \
-                            from_file, from_name, from_fqn, to_name, kind, line, import_path \
+                            from_file, from_name, from_fqn, to_name, kind, line, import_path, \
+                            confidence, flow_type \
                      FROM raw_edge \
                      WHERE from_file IN $files",
                 )
@@ -2755,18 +2882,37 @@ impl IndexPipeline {
         let all_symbols: Vec<SymbolWithPos> = match ram_symbols {
             Some(buf) => {
                 let n = buf.len();
-                let v: Vec<SymbolWithPos> = buf.into_values().collect();
+                let mut merged = buf;
+                // Supplement with symbols from other loaded repos.
+                let other_dbs: Vec<Surreal<Db>> = self
+                    .collect_db_snapshot(db)
+                    .await
+                    .into_iter()
+                    .skip(1) // skip primary (already covered by RAM buffer)
+                    .collect();
+                if !other_dbs.is_empty() {
+                    let cross_repo = load_all_symbols_multi(&other_dbs)
+                        .await
+                        .context("phase2(ram): load cross-repo symbols")?;
+                    for (k, v) in cross_repo {
+                        merged.entry(k).or_insert(v); // RAM buffer wins
+                    }
+                }
+                let total = merged.len();
+                let v: Vec<SymbolWithPos> = merged.into_values().collect();
                 // sym_load is ~0 here — the symbols never left RAM.
                 p2.sym_load_ms = t_sym_load.elapsed().as_millis() as u64;
-                info!(repo = %self.repo, symbol_count = n, sym_load_ms = p2.sym_load_ms, "phase2(ram): reused in-RAM symbol buffer (no DB reload)");
+                info!(repo = %self.repo, symbol_count = n, cross_repo_total = total, sym_load_ms = p2.sym_load_ms, "phase2(ram): reused in-RAM symbol buffer (no DB reload)");
                 v
             }
             None => {
-                let v = load_all_symbols(db)
+                let v = load_all_symbols_multi(&self.collect_db_snapshot(db).await)
                     .await
                     .context("phase2(ram): load all symbols")?;
+                let symbol_count = v.len();
+                let v: Vec<SymbolWithPos> = v.into_values().collect();
                 p2.sym_load_ms = t_sym_load.elapsed().as_millis() as u64;
-                info!(repo = %self.repo, symbol_count = v.len(), sym_load_ms = p2.sym_load_ms, "phase2(ram): loaded all symbols from DB (buffer overflowed)");
+                info!(repo = %self.repo, symbol_count = symbol_count, sym_load_ms = p2.sym_load_ms, "phase2(ram): loaded all symbols from DB (buffer overflowed)");
                 v
             }
         };
@@ -2802,7 +2948,17 @@ impl IndexPipeline {
 
         // Resolve all RAM-buffered raw_edges in one pass (no DB scan needed).
         let t_resolve = Instant::now();
-        let mut edge_batch: Vec<(String, String, i64, String, String, String, String)> = Vec::new();
+        let mut edge_batch: Vec<(
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Option<f32>,
+            Option<String>,
+        )> = Vec::new();
         let mut relate_write_ms: u64 = 0;
         let mut edges_written: u64 = 0;
 
@@ -2827,6 +2983,30 @@ impl IndexPipeline {
                 ph.set_phase_done(i as u64).await;
             }
             // Resolve this edge using the symbol map.
+            // Short-circuit: taint sentinel edges bypass symbol resolution.
+            if re.to_name.starts_with("taint:") {
+                edge_batch.push((
+                    re.from_fqn.clone(),
+                    re.to_name.clone(),
+                    re.line,
+                    re.from_file.clone(),
+                    String::new(),
+                    re.from_fqn.clone(),
+                    re.to_name.clone(),
+                    re.confidence,
+                    re.flow_type.clone(),
+                ));
+                if edge_batch.len() >= EDGE_RELATE_BATCH_SIZE {
+                    let t_write = Instant::now();
+                    edges_written += edge_batch.len() as u64;
+                    flush_edge_batch(db, &edge_batch)
+                        .await
+                        .context("phase2(ram): flush edge batch")?;
+                    relate_write_ms += t_write.elapsed().as_millis() as u64;
+                    edge_batch.clear();
+                }
+                continue;
+            }
             let candidates = match name_bucket.get(&re.to_name) {
                 Some(v) if !v.is_empty() => v,
                 _ => continue,
@@ -2849,6 +3029,8 @@ impl IndexPipeline {
                 best.file.clone(),
                 re.from_fqn.clone(),
                 best.fqn.clone(),
+                re.confidence,
+                re.flow_type.clone(),
             ));
 
             if edge_batch.len() >= EDGE_RELATE_BATCH_SIZE {
@@ -2923,6 +3105,37 @@ impl IndexPipeline {
 
     // ─── Incremental Phase 2: scoped edge resolution ──────────────────────
 
+    /// Repair incremental edges in the database that owns each caller. The
+    /// changed repo is resolved first; loaded foreign DBs contribute only callers
+    /// actually affected by the changed symbol surface/name set.
+    async fn resolve_edges_incremental_all_dbs(
+        &self,
+        db: &Surreal<Db>,
+        changed_files: &[String],
+        dir1_callers: &[String],
+        removed_surface_files: &[String],
+        added_names: &[String],
+    ) -> Result<Phase2IncrStats> {
+        let mut stats = self
+            .resolve_edges_incremental(db, changed_files, dir1_callers, added_names)
+            .await
+            .context("incremental_run: resolve primary repo edges")?;
+
+        // Cross-repo calls are stored in the caller DB, not the callee DB.
+        for owner_db in self.collect_foreign_db_snapshot().await {
+            let foreign_dir1 =
+                query_direction1_callers(&owner_db, removed_surface_files, changed_files)
+                    .await
+                    .context("incremental_run: query foreign direction-1 callers")?;
+            let foreign_stats = self
+                .resolve_edges_incremental(&owner_db, &[], &foreign_dir1, added_names)
+                .await
+                .context("incremental_run: resolve foreign caller-owned edges")?;
+            merge_phase2_incr_stats(&mut stats, foreign_stats);
+        }
+        Ok(stats)
+    }
+
     /// Re-resolve only the edges that touch the blast radius of an edit.
     ///
     /// Complexity: O(changed + callers_of_removed_surface + callers_of_added_names)
@@ -2988,7 +3201,7 @@ impl IndexPipeline {
 
         let mut stats = Phase2IncrStats::default();
 
-        if changed_files.is_empty() {
+        if changed_files.is_empty() && dir1_callers.is_empty() && added_names.is_empty() {
             return Ok(stats);
         }
 
@@ -3101,13 +3314,24 @@ impl IndexPipeline {
         let reresolve_start = Instant::now();
         let page_size: i64 = WRITE_BATCH_SIZE as i64;
         let mut cursor = String::new();
-        let mut edge_batch: Vec<(String, String, i64, String, String, String, String)> = Vec::new();
+        let mut edge_batch: Vec<(
+            String,
+            String,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            Option<f32>,
+            Option<String>,
+        )> = Vec::new();
 
         loop {
             let batch: Vec<RawEdgeRow> = db
                 .query(
                     "SELECT type::string(id) AS id_str, \
-                            from_file, from_name, from_fqn, to_name, kind, line, import_path \
+                            from_file, from_name, from_fqn, to_name, kind, line, import_path, \
+                            confidence, flow_type \
                      FROM raw_edge \
                      WHERE from_file IN $files \
                        AND type::string(id) > $cursor \
@@ -3127,7 +3351,13 @@ impl IndexPipeline {
 
             cursor = batch.last().map(|r| r.id_str.clone()).unwrap_or(cursor);
 
-            resolve_raw_edge_page(db, &batch, &mut edge_batch, "incremental phase2").await?;
+            resolve_raw_edge_page(
+                &self.collect_db_snapshot(db).await,
+                &batch,
+                &mut edge_batch,
+                "incremental phase2",
+            )
+            .await?;
 
             let batch_len = batch.len() as i64;
             if batch_len < page_size {
@@ -3146,6 +3376,41 @@ impl IndexPipeline {
         info!(repo = %self.repo, resolve_set = resolve_set.len(), "incremental Phase 2 edge resolution complete");
         Ok(stats)
     }
+}
+
+async fn query_direction1_callers(
+    db: &Surreal<Db>,
+    removed_surface_files: &[String],
+    affected_files: &[String],
+) -> Result<Vec<String>> {
+    if removed_surface_files.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[derive(Deserialize)]
+    struct CallerRow {
+        in_file: String,
+    }
+    let rows: Vec<CallerRow> = db
+        .query(
+            "SELECT in_file FROM calls \
+             WHERE out_file IN $changed AND in_file NOT IN $affected \
+             GROUP BY in_file",
+        )
+        .bind(("changed", removed_surface_files.to_vec()))
+        .bind(("affected", affected_files.to_vec()))
+        .await
+        .context("incremental direction-1 caller query")?
+        .take(0)
+        .context("incremental direction-1 caller decode")?;
+    Ok(rows.into_iter().map(|row| row.in_file).collect())
+}
+
+fn merge_phase2_incr_stats(total: &mut Phase2IncrStats, next: Phase2IncrStats) {
+    total.p2_symname_ms += next.p2_symname_ms;
+    total.p2_dir2_scan_ms += next.p2_dir2_scan_ms;
+    total.p2_delete_calls_ms += next.p2_delete_calls_ms;
+    total.p2_reresolve_ms += next.p2_reresolve_ms;
+    total.resolve_set_size += next.resolve_set_size;
 }
 
 // ─── Incremental blast-radius gating: symbol-surface delta ────────────────
@@ -3344,6 +3609,18 @@ async fn load_all_symbols(db: &Surreal<Db>) -> Result<Vec<SymbolWithPos>> {
         .collect())
 }
 
+async fn load_all_symbols_multi(dbs: &[Surreal<Db>]) -> Result<HashMap<String, SymbolWithPos>> {
+    let mut result: HashMap<String, SymbolWithPos> = HashMap::new();
+    for db in dbs {
+        let symbols = load_all_symbols(db).await?;
+        // Caller's DB (index 0) wins on FQN collision — insert_or_ignore.
+        for s in symbols {
+            result.entry(s.fqn.clone()).or_insert(s);
+        }
+    }
+    Ok(result)
+}
+
 /// Strip SurrealDB complex-ID brackets ⟨…⟩ returned by `meta::id(id)`.
 fn strip_id_brackets_phase2(id: &str) -> String {
     id.strip_prefix("⟨")
@@ -3357,10 +3634,37 @@ fn strip_id_brackets_phase2(id: &str) -> String {
 fn resolve_raw_edge_page_from_map(
     name_bucket: &HashMap<String, Vec<SymbolWithPos>>,
     batch: &[RawEdgeRow],
-    edge_batch: &mut Vec<(String, String, i64, String, String, String, String)>,
+    edge_batch: &mut Vec<(
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        Option<f32>,
+        Option<String>,
+    )>,
     label: &str,
 ) {
     for row in batch {
+        // Taint source/sink targets are deliberate sentinels rather than symbol names.
+        // They must survive the DB-overflow/recovery path just as they do the RAM path.
+        if row.to_name.starts_with("taint:") {
+            edge_batch.push((
+                row.from_fqn.clone(),
+                row.to_name.clone(),
+                row.line,
+                row.from_file.clone(),
+                String::new(),
+                row.from_fqn.clone(),
+                row.to_name.clone(),
+                row.confidence,
+                row.flow_type.clone(),
+            ));
+            continue;
+        }
+
         let resolved_to = match name_bucket.get(&row.to_name) {
             Some(candidates) if !candidates.is_empty() => IndexPipeline::select_best_candidate(
                 candidates,
@@ -3383,6 +3687,8 @@ fn resolve_raw_edge_page_from_map(
                 to.file.clone(),
                 row.from_fqn.clone(),
                 to.fqn.clone(),
+                row.confidence,
+                row.flow_type.clone(),
             ));
         }
     }
@@ -3408,7 +3714,11 @@ fn parse_one_file_with_frameworks(
         if let Ok(source) = std::fs::read_to_string(file) {
             let fw_edges = registry.extract_edges(file, &source, &parsed.symbols);
             for edge in fw_edges {
-                if matches!(edge.kind, crate::parsing::relations::EdgeKind::Calls) {
+                if matches!(
+                    edge.kind,
+                    crate::parsing::relations::EdgeKind::Calls
+                        | crate::parsing::relations::EdgeKind::DataFlowsTo
+                ) {
                     let (to_name, import_path) = match &edge.to {
                         crate::parsing::relations::EdgeTarget::Unresolved {
                             name,
@@ -3427,6 +3737,30 @@ fn parse_one_file_with_frameworks(
                         kind: "calls".to_string(),
                         line: edge.line as i64,
                         import_path,
+                        confidence: match edge.confidence {
+                            Confidence::Extracted => None,
+                            Confidence::Inferred(p) => Some(p),
+                        },
+                        flow_type: if matches!(
+                            edge.kind,
+                            crate::parsing::relations::EdgeKind::DataFlowsTo
+                        ) {
+                            let to_name = match &edge.to {
+                                crate::parsing::relations::EdgeTarget::Unresolved {
+                                    name, ..
+                                } => name.as_str(),
+                                _ => "",
+                            };
+                            if to_name.starts_with("taint:source:") {
+                                Some("taint_source".to_string())
+                            } else if to_name.starts_with("taint:sink:") {
+                                Some("taint_sink".to_string())
+                            } else {
+                                Some("data_flows_to".to_string())
+                            }
+                        } else {
+                            None
+                        },
                     });
                 }
             }
@@ -3490,8 +3824,8 @@ fn parse_one_file(file: &str) -> ParseOutput {
                 } => (name.clone(), import_path.clone()),
                 EdgeTarget::Resolved(qs) => (qs.name.clone(), None),
             };
-            // Only store Calls edges (❼ spec: only `calls` table uses in_name/out_name).
-            if matches!(e.kind, EdgeKind::Calls) {
+            // Only store Calls and DataFlowsTo edges (❼ spec: only `calls` table uses in_name/out_name).
+            if matches!(e.kind, EdgeKind::Calls | EdgeKind::DataFlowsTo) {
                 Some(RawEdgeRecord {
                     from_file: e.from.file.clone(),
                     from_name: e.from.name.clone(),
@@ -3500,6 +3834,25 @@ fn parse_one_file(file: &str) -> ParseOutput {
                     kind: "calls".to_string(),
                     line: e.line as i64,
                     import_path,
+                    confidence: match e.confidence {
+                        Confidence::Extracted => None,
+                        Confidence::Inferred(p) => Some(p),
+                    },
+                    flow_type: if matches!(e.kind, EdgeKind::DataFlowsTo) {
+                        let to_name = match &e.to {
+                            EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                            _ => "",
+                        };
+                        if to_name.starts_with("taint:source:") {
+                            Some("taint_source".to_string())
+                        } else if to_name.starts_with("taint:sink:") {
+                            Some("taint_sink".to_string())
+                        } else {
+                            Some("data_flows_to".to_string())
+                        }
+                    } else {
+                        None
+                    },
                 })
             } else {
                 // For non-calls edges, still resolve them synchronously (no in_name needed).
@@ -3992,7 +4345,9 @@ async fn flush_raw_edge_batch_native(db: &Surreal<Db>, edges: &[RawEdgeRecord]) 
             db.query("INSERT INTO raw_edge $data RETURN NONE")
                 .bind(("data", records))
                 .await
-                .context("flush_raw_edge_batch_native")?;
+                .context("flush_raw_edge_batch_native: INSERT")?
+                .check()
+                .context("flush_raw_edge_batch_native: INSERT statement error")?;
         }
     }
     Ok(())
@@ -4014,20 +4369,31 @@ async fn flush_raw_edge_batch_native(db: &Surreal<Db>, edges: &[RawEdgeRecord]) 
 ///   this parsing overhead dominated (~14s vs ~7s minimum for the raw KV writes).
 async fn flush_edge_batch(
     db: &Surreal<Db>,
-    batch: &[(String, String, i64, String, String, String, String)],
+    batch: &[(
+        String,
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        Option<f32>,
+        Option<String>,
+    )],
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
 
     // Build a sql::Array of sql::Object records.  Each Object has:
-    //   in:       Value::Thing(symbol:⟨from_fqn⟩)
-    //   out:      Value::Thing(symbol:⟨to_fqn⟩)
-    //   line:     Value::Number(i64)
-    //   in_file:  Value::Strand(string)
-    //   out_file: Value::Strand(string)
-    //   in_name:  Value::Strand(string)
-    //   out_name: Value::Strand(string)
+    //   in:         Value::Thing(symbol:⟨from_fqn⟩)
+    //   out:        Value::Thing(symbol:⟨to_fqn⟩)
+    //   line:       Value::Number(i64)
+    //   in_file:    Value::Strand(string)
+    //   out_file:   Value::Strand(string)
+    //   in_name:    Value::Strand(string)
+    //   out_name:   Value::Strand(string)
+    //   confidence: Value::Number(f64) | Value::None
     //
     // The Array is passed as `$data`.  `to_value(sql::Array)` fast-paths through
     // `sql::Array as v => Ok(v.into())` — no serde, no type loss.
@@ -4036,7 +4402,17 @@ async fn flush_edge_batch(
     let records: Vec<SqlValue> = batch
         .iter()
         .map(
-            |(from_fqn, to_fqn, line, in_file, out_file, in_name, out_name)| {
+            |(
+                from_fqn,
+                to_fqn,
+                line,
+                in_file,
+                out_file,
+                in_name,
+                out_name,
+                confidence,
+                flow_type,
+            )| {
                 let mut map: BTreeMap<String, SqlValue> = BTreeMap::new();
                 map.insert(
                     "in".to_string(),
@@ -4051,6 +4427,20 @@ async fn flush_edge_batch(
                 map.insert("out_file".to_string(), SqlValue::from(out_file.as_str()));
                 map.insert("in_name".to_string(), SqlValue::from(in_name.as_str()));
                 map.insert("out_name".to_string(), SqlValue::from(out_name.as_str()));
+                map.insert(
+                    "confidence".to_string(),
+                    match confidence {
+                        Some(p) => SqlValue::from(*p as f64),
+                        None => SqlValue::None,
+                    },
+                );
+                map.insert(
+                    "flow_type".to_string(),
+                    match flow_type {
+                        Some(ft) => SqlValue::from(ft.as_str()),
+                        None => SqlValue::None,
+                    },
+                );
                 SqlValue::Object(SqlObject::from(map))
             },
         )
@@ -4064,12 +4454,83 @@ async fn flush_edge_batch(
     db.query("INSERT INTO calls $data")
         .bind(("data", data))
         .await
-        .context("flush_edge_batch: INSERT")?;
+        .context("flush_edge_batch: INSERT")?
+        .check()
+        .context("flush_edge_batch: INSERT statement error")?;
 
     Ok(())
 }
 
 // ─── Watcher change filter ────────────────────────────────────────────────
+
+// ─── Framework identity change scope ──────────────────────────────────────
+
+/// Files whose content or presence can change which manifest-driven framework
+/// resolvers are active. Source-content detectors (Django, etc.) are already
+/// reparsed when that source file itself changes and do not need repo-wide work.
+fn framework_identity_kind(path: &str) -> Option<&'static str> {
+    let normalized = path.replace('\\', "/");
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    match name {
+        "package.json" => Some("javascript"),
+        "pom.xml" | "build.gradle" => Some("jvm"),
+        "go.mod" => Some("go"),
+        "requirements.txt" | "pyproject.toml" => Some("python"),
+        "composer.json" => Some("php"),
+        "Gemfile" => Some("ruby"),
+        "pubspec.yaml" => Some("dart"),
+        _ => None,
+    }
+}
+
+fn is_framework_identity_file(path: &str) -> bool {
+    framework_identity_kind(path).is_some()
+}
+
+/// Limit manifest-triggered reparsing to source languages whose framework
+/// activation may have changed. This avoids turning every incremental into a
+/// repository-wide reindex while still rebuilding/removing durable framework edges.
+fn is_framework_affected_source(file: &str, changes: &[FileChange]) -> bool {
+    changes.iter().any(|change| {
+        let Some(kind) = framework_identity_kind(&change.path) else {
+            return false;
+        };
+        match kind {
+            "javascript" => {
+                file.ends_with(".js")
+                    || file.ends_with(".jsx")
+                    || file.ends_with(".mjs")
+                    || file.ends_with(".cjs")
+                    || file.ends_with(".ts")
+                    || file.ends_with(".tsx")
+            }
+            "jvm" => file.ends_with(".java") || file.ends_with(".kt"),
+            "go" => file.ends_with(".go"),
+            "python" => file.ends_with(".py"),
+            "php" => file.ends_with(".php"),
+            "ruby" => file.ends_with(".rb"),
+            "dart" => file.ends_with(".dart"),
+            _ => false,
+        }
+    })
+}
+
+#[cfg(test)]
+mod framework_identity_tests {
+    use super::*;
+
+    #[test]
+    fn package_manifest_reprocesses_mjs_and_cjs_sources() {
+        let changes = vec![FileChange {
+            path: "package.json".to_string(),
+            kind: ChangeKind::Modified,
+        }];
+
+        assert!(is_framework_affected_source("src/server.mjs", &changes));
+        assert!(is_framework_affected_source("src/server.cjs", &changes));
+        assert!(!is_framework_affected_source("src/lib.rs", &changes));
+    }
+}
 
 /// Filter watcher-supplied file changes down to the same set `walk_repo` would
 /// index during a full rebuild: indexable extension, not in a dot-dir, not in a
@@ -6977,6 +7438,8 @@ mod ram_path_fqn_tests {
             kind: "calls".to_string(),
             line: 7,
             import_path: None,
+            confidence: None,
+            flow_type: None,
         }];
 
         let pipeline = IndexPipeline::new(repo.to_string(), None);
@@ -7015,6 +7478,60 @@ mod ram_path_fqn_tests {
         );
     }
 
+    /// Non-taint DataFlowsTo edges must have flow_type = "data_flows_to", not NULL.
+    /// This distinguishes them from plain Calls edges, making them queryable as a class.
+    #[tokio::test]
+    async fn non_taint_dataflow_has_flow_type() {
+        use serde::Deserialize;
+        let home = TempDir::new().unwrap();
+        let repo = "/test/dataflow_type";
+        let db = open_db(home.path(), repo, 0).await.unwrap();
+
+        insert_symbol_fqn(&db, "/a.rs::process", "/a.rs", "process").await;
+        insert_symbol_fqn(&db, "/a.rs::compute", "/a.rs", "compute").await;
+
+        // Construct a DataFlowsTo edge with a normal callee (not a taint sentinel)
+        let raw_edges = vec![RawEdgeRecord {
+            from_file: "/a.rs".to_string(),
+            from_name: "process".to_string(),
+            from_fqn: "/a.rs::process".to_string(),
+            to_name: "compute".to_string(),
+            kind: "calls".to_string(),
+            line: 10,
+            import_path: None,
+            confidence: None,
+            flow_type: Some("data_flows_to".to_string()),
+        }];
+
+        let pipeline = IndexPipeline::new(repo.to_string(), None);
+        pipeline
+            .resolve_edges_from_ram(&db, raw_edges, None, None, None)
+            .await
+            .expect("resolve_edges_from_ram");
+
+        #[derive(Deserialize, Debug)]
+        struct FlowRow {
+            flow_type: Option<String>,
+        }
+        let rows: Vec<FlowRow> = db
+            .query("SELECT flow_type FROM calls WHERE flow_type IS NOT NULL")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected exactly one edge with flow_type, got {rows:?}"
+        );
+        assert_eq!(
+            rows[0].flow_type.as_deref(),
+            Some("data_flows_to"),
+            "non-taint DataFlowsTo edge must have flow_type='data_flows_to', not NULL"
+        );
+    }
+
     /// A pre-cancelled token must abort Phase 2 (RAM path) with PipelineAbort::Cancelled
     /// and leave the edges_resolved marker UNSET, so the next run replays/rebuilds.
     /// This pins the cancellation responsiveness added to resolve_edges_from_ram —
@@ -7036,6 +7553,8 @@ mod ram_path_fqn_tests {
             kind: "calls".to_string(),
             line: 7,
             import_path: None,
+            confidence: None,
+            flow_type: None,
         }];
 
         let token = CancellationToken::new();
@@ -7193,6 +7712,8 @@ mod ram_symbol_buffer_invariance_tests {
             kind: "calls".to_string(),
             line: 3,
             import_path: None,
+            confidence: None,
+            flow_type: None,
         }];
 
         let home = TempDir::new().unwrap();
@@ -7328,6 +7849,8 @@ mod ram_symbol_buffer_invariance_tests {
                 kind: "calls".to_string(),
                 line: 3,
                 import_path: None,
+                confidence: None,
+                flow_type: None,
             },
             RawEdgeRecord {
                 from_file: "/util.cpp".to_string(),
@@ -7337,6 +7860,8 @@ mod ram_symbol_buffer_invariance_tests {
                 kind: "calls".to_string(),
                 line: 4,
                 import_path: None,
+                confidence: None,
+                flow_type: None,
             },
         ];
 
@@ -7406,6 +7931,8 @@ mod ram_symbol_buffer_invariance_tests {
             kind: "calls".to_string(),
             line: 3,
             import_path: None,
+            confidence: None,
+            flow_type: None,
         }];
         let pipeline = IndexPipeline::new("/test/overflow".to_string(), None);
 
@@ -8685,6 +9212,407 @@ mod transient_embed_resilience_tests {
         assert_eq!(
             TRANSIENT_RETRY_LIMIT_FOR_TEST, 6,
             "TRANSIENT_RETRY_LIMIT must be 6 to ride out multi-second gateway blips"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reviewed_edge_regressions {
+    use super::*;
+    use crate::store::open_db;
+    use serde::Deserialize;
+    use tempfile::TempDir;
+
+    #[derive(Deserialize)]
+    struct PersistedRawEdge {
+        id_str: String,
+        from_file: String,
+        from_name: String,
+        from_fqn: String,
+        to_name: String,
+        kind: String,
+        line: i64,
+        import_path: Option<String>,
+        confidence: Option<f32>,
+        flow_type: Option<String>,
+    }
+
+    #[tokio::test]
+    async fn raw_edge_metadata_persists_and_replays_taint_sentinel() {
+        let home = TempDir::new().unwrap();
+        let db = open_db(home.path(), "/test/raw_edge_metadata", 0)
+            .await
+            .unwrap();
+        let record = RawEdgeRecord {
+            from_file: "/test/source.rs".into(),
+            from_name: "source".into(),
+            from_fqn: "/test/source.rs::source".into(),
+            to_name: "taint:sink:sql".into(),
+            kind: "calls".into(),
+            line: 7,
+            import_path: Some("db".into()),
+            confidence: Some(0.7),
+            flow_type: Some("taint_sink".into()),
+        };
+        flush_raw_edge_batch_native(&db, &[record]).await.unwrap();
+        let rows: Vec<PersistedRawEdge> = db
+            .query(
+                "SELECT type::string(id) AS id_str, from_file, from_name, from_fqn, \
+             to_name, kind, line, import_path, confidence, flow_type FROM raw_edge",
+            )
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].confidence, Some(0.7));
+        assert_eq!(rows[0].flow_type.as_deref(), Some("taint_sink"));
+
+        let replay = RawEdgeRow {
+            id_str: rows[0].id_str.clone(),
+            from_file: rows[0].from_file.clone(),
+            from_name: rows[0].from_name.clone(),
+            from_fqn: rows[0].from_fqn.clone(),
+            to_name: rows[0].to_name.clone(),
+            kind: rows[0].kind.clone(),
+            line: rows[0].line,
+            import_path: rows[0].import_path.clone(),
+            confidence: rows[0].confidence,
+            flow_type: rows[0].flow_type.clone(),
+        };
+        let mut resolved = Vec::new();
+        resolve_raw_edge_page_from_map(&HashMap::new(), &[replay], &mut resolved, "test");
+        assert_eq!(
+            resolved.len(),
+            1,
+            "taint sentinel must bypass symbol lookup during replay"
+        );
+        assert_eq!(resolved[0].1, "taint:sink:sql");
+        assert_eq!(resolved[0].7, Some(0.7));
+        assert_eq!(resolved[0].8.as_deref(), Some("taint_sink"));
+    }
+
+    async fn insert_test_symbol(db: &Surreal<Db>, file: &str, name: &str) {
+        let fqn = format!("{file}::{name}");
+        let thing = surrealdb::sql::Thing::from(("symbol", surrealdb::sql::Id::String(fqn)));
+        db.query(
+            "CREATE $thing SET file = $file, name = $name, kind = 'function', \
+             line_start = 1, line_end = 2, signature = NONE, parent = NONE",
+        )
+        .bind(("thing", thing))
+        .bind(("file", file.to_string()))
+        .bind(("name", name.to_string()))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    }
+
+    async fn insert_test_raw_edge(
+        db: &Surreal<Db>,
+        from_file: &str,
+        from_name: &str,
+        to_name: &str,
+    ) {
+        flush_raw_edge_batch_native(
+            db,
+            &[RawEdgeRecord {
+                from_file: from_file.to_string(),
+                from_name: from_name.to_string(),
+                from_fqn: format!("{from_file}::{from_name}"),
+                to_name: to_name.to_string(),
+                kind: "calls".into(),
+                line: 1,
+                import_path: None,
+                confidence: None,
+                flow_type: None,
+            }],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn test_calls(db: &Surreal<Db>) -> Vec<(String, String, String, String)> {
+        #[derive(Deserialize)]
+        struct Row {
+            in_file: String,
+            out_file: String,
+            in_name: String,
+            out_name: String,
+        }
+        let rows: Vec<Row> = db
+            .query("SELECT in_file, out_file, in_name, out_name FROM calls")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        rows.into_iter()
+            .map(|row| (row.in_file, row.out_file, row.in_name, row.out_name))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn cross_repo_callee_removal_refreshes_caller_owned_edge() {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let home = TempDir::new().unwrap();
+        let repo_a = "/repo/a";
+        let repo_b = "/repo/b";
+        let db_a = open_db(home.path(), repo_a, 0).await.unwrap();
+        let db_b = open_db(home.path(), repo_b, 0).await.unwrap();
+        let caller_file = "/repo/a/caller.rs";
+        let old_target = "/repo/b/old.rs";
+        let fallback_target = "/repo/b/z.rs";
+
+        insert_test_symbol(&db_b, old_target, "foo").await;
+        insert_test_symbol(&db_b, fallback_target, "foo").await;
+        insert_test_raw_edge(&db_a, caller_file, "a", "foo").await;
+        let repo_dbs: RepoDbMap = Arc::new(RwLock::new(HashMap::from([
+            (repo_a.to_string(), db_a.clone()),
+            (repo_b.to_string(), db_b.clone()),
+        ])));
+        let pipeline = IndexPipeline::new(repo_b.to_string(), None).with_repo_dbs(repo_dbs);
+        pipeline
+            .resolve_edges_phase2(&db_a, None, None)
+            .await
+            .unwrap();
+        let initial = test_calls(&db_a).await;
+        assert!(
+            initial.iter().any(|(_, out, _, _)| out == old_target),
+            "{initial:?}"
+        );
+
+        // Simulate repo B's incremental delete of the lexicographically winning
+        // target. The raw caller edge remains durable only in repo A.
+        db_b.query("DELETE FROM symbol WHERE file = $file")
+            .bind(("file", old_target.to_string()))
+            .await
+            .unwrap();
+        let removed = vec![old_target.to_string()];
+        pipeline
+            .resolve_edges_incremental_all_dbs(&db_b, &removed, &[], &removed, &[])
+            .await
+            .unwrap();
+
+        let refreshed = test_calls(&db_a).await;
+        assert_eq!(refreshed.len(), 1, "{refreshed:?}");
+        assert!(
+            refreshed.iter().any(|(_, out, _, fqn)| {
+                out == fallback_target && fqn == &format!("{fallback_target}::foo")
+            }),
+            "caller-owned edge was not refreshed: {refreshed:?}"
+        );
+    }
+
+    #[test]
+    fn incremental_framework_detection_uses_manifest_outside_change_batch() {
+        let repo = TempDir::new().unwrap();
+        let package = repo.path().join("package.json");
+        let controller = repo.path().join("users.controller.ts");
+        std::fs::write(&package, r#"{"dependencies":{"@nestjs/core":"^10"}}"#).unwrap();
+        std::fs::write(&controller, "@Get('/users')\ngetUsers() {}\n").unwrap();
+        let changed = controller.to_string_lossy().replace('\\', "/");
+        let inventory = walk_repo_with(
+            repo.path().to_str().unwrap(),
+            &[],
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert!(inventory.iter().any(|f| f.ends_with("package.json")));
+        assert!(
+            ![changed.clone()]
+                .iter()
+                .any(|f| f.ends_with("package.json"))
+        );
+
+        let mut batch_registry = crate::indexing::frameworks::FrameworkRegistry::new();
+        let batch_set: HashSet<String> = [changed.clone()].into_iter().collect();
+        batch_registry.detect(&crate::indexing::frameworks::DetectionContext {
+            file_set: &batch_set,
+            read_file: &|path| std::fs::read_to_string(path).ok(),
+        });
+        let ParseOutput::Parsed(without_manifest) =
+            parse_one_file_with_frameworks(&changed, &batch_registry)
+        else {
+            panic!("controller should parse")
+        };
+        assert!(
+            !without_manifest
+                .raw_edges
+                .iter()
+                .any(|e| e.to_name == "getUsers"),
+            "the old batch-only detection mechanism must reproduce the lost edge"
+        );
+
+        let mut registry = crate::indexing::frameworks::FrameworkRegistry::new();
+        let file_set: HashSet<String> = inventory.into_iter().collect();
+        registry.detect(&crate::indexing::frameworks::DetectionContext {
+            file_set: &file_set,
+            read_file: &|path| std::fs::read_to_string(path).ok(),
+        });
+        assert!(registry.active_names().contains(&"nestjs"));
+        let ParseOutput::Parsed(parsed) = parse_one_file_with_frameworks(&changed, &registry)
+        else {
+            panic!("controller should parse")
+        };
+        assert!(parsed.raw_edges.iter().any(|e| e.to_name == "getUsers"));
+    }
+
+    #[tokio::test]
+    async fn manifest_only_incremental_enables_and_disables_existing_nestjs_edges() {
+        let home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let repo_path = repo.path().to_string_lossy().replace('\\', "/");
+        let package = repo.path().join("package.json");
+        let controller = repo.path().join("users.controller.ts");
+        std::fs::write(&package, r#"{"dependencies":{}}"#).unwrap();
+        std::fs::write(&controller, "@Get('/users')\ngetUsers() {}\n").unwrap();
+        let package_path = package.to_string_lossy().replace('\\', "/");
+        let controller_path = controller.to_string_lossy().replace('\\', "/");
+        let db = open_db(home.path(), &repo_path, 0).await.unwrap();
+        let pipeline =
+            IndexPipeline::new(repo_path.clone(), None).allow_no_client_mutation_for_test();
+        for path in [package_path.clone(), controller_path.clone()] {
+            crate::store::ops::upsert_file_meta(
+                &db,
+                &crate::store::ops::FileMeta {
+                    path,
+                    mtime: 0,
+                    size: 0,
+                    repo: repo_path.clone(),
+                    chunk_count: 0,
+                    chunker_version: crate::parsing::chunker::CHUNKER_VERSION,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        std::fs::write(&package, r#"{"dependencies":{"@nestjs/core":"^10"}}"#).unwrap();
+        pipeline
+            .run(
+                &db,
+                Some(vec![FileChange {
+                    path: package_path.clone(),
+                    kind: ChangeKind::Modified,
+                }]),
+                false,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        #[derive(Deserialize)]
+        struct EdgeCount {
+            count: i64,
+        }
+        async fn count(db: &Surreal<Db>) -> i64 {
+            let rows: Vec<EdgeCount> = db
+                .query("SELECT count() AS count FROM raw_edge WHERE to_name = 'getUsers' GROUP ALL")
+                .await
+                .unwrap()
+                .take(0)
+                .unwrap();
+            rows.first().map(|row| row.count).unwrap_or(0)
+        }
+        assert!(
+            count(&db).await > 0,
+            "manifest-only enable must reparse controller"
+        );
+
+        std::fs::write(&package, r#"{"dependencies":{}}"#).unwrap();
+        pipeline
+            .run(
+                &db,
+                Some(vec![FileChange {
+                    path: package_path,
+                    kind: ChangeKind::Modified,
+                }]),
+                false,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            count(&db).await,
+            0,
+            "manifest-only disable must remove controller edge"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_only_incremental_run_retains_nestjs_edge() {
+        let home = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let repo_path = repo.path().to_string_lossy().replace('\\', "/");
+        let package = repo.path().join("package.json");
+        let controller = repo.path().join("users.controller.ts");
+        std::fs::write(&package, r#"{"dependencies":{"@nestjs/core":"^10"}}"#).unwrap();
+        std::fs::write(&controller, "@Get('/users')\ngetUsers() {}\n").unwrap();
+        let controller_path = controller.to_string_lossy().replace('\\', "/");
+
+        let db = open_db(home.path(), &repo_path, 0).await.unwrap();
+        let pipeline =
+            IndexPipeline::new(repo_path.clone(), None).allow_no_client_mutation_for_test();
+        // Seed the durable repository inventory that run() already loads before
+        // entering the watcher incremental path.
+        for path in [
+            package.to_string_lossy().replace('\\', "/"),
+            controller_path.clone(),
+        ] {
+            crate::store::ops::upsert_file_meta(
+                &db,
+                &crate::store::ops::FileMeta {
+                    path,
+                    mtime: 0,
+                    size: 0,
+                    repo: repo_path.clone(),
+                    chunk_count: 0,
+                    chunker_version: crate::parsing::chunker::CHUNKER_VERSION,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        pipeline
+            .run(
+                &db,
+                Some(vec![FileChange {
+                    path: controller_path.clone(),
+                    kind: ChangeKind::Modified,
+                }]),
+                false,
+                None,
+                None,
+                None,
+                &[],
+                None,
+            )
+            .await
+            .unwrap();
+
+        #[derive(Deserialize)]
+        struct EdgeCount {
+            count: i64,
+        }
+        let rows: Vec<EdgeCount> = db
+            .query("SELECT count() AS count FROM raw_edge WHERE to_name = 'getUsers' GROUP ALL")
+            .await
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert!(
+            rows.first().map(|r| r.count).unwrap_or(0) > 0,
+            "manifest-dependent framework edge disappeared after controller-only incremental edit"
         );
     }
 }

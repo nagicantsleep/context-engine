@@ -524,6 +524,20 @@ pub async fn insert_edge(
             .await
             .context("insert implements edge")?;
         }
+        EdgeKind::DataFlowsTo => {
+            db.query(
+                "RELATE type::thing($from)->calls->type::thing($to) \
+                 SET line = $line, in_file = $in_file, out_file = $out_file, \
+                     flow_type = 'data_flows_to'",
+            )
+            .bind(("from", from_id))
+            .bind(("to", to_id))
+            .bind(("line", line as i64))
+            .bind(("in_file", in_file))
+            .bind(("out_file", out_file))
+            .await
+            .context("insert data_flows_to edge")?;
+        }
     }
 
     Ok(())
@@ -721,6 +735,28 @@ pub async fn find_symbols_by_names_with_pos(
             line_end: r.line_end,
         })
         .collect())
+}
+
+/// Fan-out variant: queries every DB in `dbs` and deduplicates results by FQN.
+/// FQNs are absolute-path-based and globally unique per machine, so a name
+/// appearing in multiple repos produces distinct FQNs — all are kept as
+/// candidates for `select_best_candidate`.
+pub async fn find_symbols_by_names_with_pos_multi(
+    dbs: &[Surreal<Db>],
+    names: &[String],
+) -> Result<Vec<SymbolWithPos>> {
+    if dbs.is_empty() || names.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut all: Vec<SymbolWithPos> = Vec::new();
+    for db in dbs {
+        let rows = find_symbols_by_names_with_pos(db, names).await?;
+        all.extend(rows);
+    }
+    // Deduplicate by FQN: first occurrence wins (caller's DB is dbs[0]).
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|s| seen.insert(s.fqn.clone()));
+    Ok(all)
 }
 
 /// Count indexed files for a repo.

@@ -27,7 +27,8 @@ use crate::store::schema::SCHEMA_DDL;
 ///      graph-adjacency writes on every edge (~44% of Phase-2 write time on the
 ///      kernel). The migration clears old RELATION rows so they re-resolve as
 ///      plain rows. Output (call-graph nodes/edges) is byte-identical.
-pub const DB_SCHEMA_VERSION: u32 = 6;
+/// v9 = calls.flow_type added; DataFlowsTo edges stored alongside plain calls.
+pub const DB_SCHEMA_VERSION: u32 = 9;
 
 /// key in index_meta for the DB schema version.
 pub const DB_SCHEMA_VERSION_KEY: &str = "db_schema_version";
@@ -246,6 +247,15 @@ pub fn maybe_spawn_migration(repo_dbs: RepoDbMap, repo: String, stored_version: 
             }
             if stored_version < 6 {
                 run_migration_v5_to_v6(&db).await.context("v5→v6")?;
+            }
+            if stored_version < 7 {
+                run_migration_v6_to_v7(&db).await.context("v6→v7")?;
+            }
+            if stored_version < 8 {
+                run_migration_v7_to_v8(&db).await.context("v7→v8")?;
+            }
+            if stored_version < 9 {
+                run_migration_v8_to_v9(&db).await.context("v8→v9")?;
             }
             Ok(())
         }
@@ -752,6 +762,91 @@ pub async fn run_migration_v5_to_v6(db: &Surreal<Db>) -> Result<()> {
         .context("migration v5→v6: stamp db_schema_version=6")?;
 
     info!("migration v5→v6 complete");
+    Ok(())
+}
+
+pub async fn run_migration_v8_to_v9(db: &Surreal<Db>) -> Result<()> {
+    use serde::Deserialize;
+
+    info!("migration v8→v9: calls.flow_type added");
+
+    // Gate: verify flow_type column is writable
+    let test_id = format!(
+        "test:migration_v8_v9:{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let test_record = serde_json::json!({
+        "in_fqn": "test::migration",
+        "out_fqn": "test::target",
+        "line": 1,
+        "in_file": "test.rs",
+        "out_file": "test.rs",
+        "in_name": "migration",
+        "out_name": "target",
+        "confidence": 1.0,
+        "flow_type": "test_v9",
+    });
+
+    db.create(("calls", test_id.as_str()))
+        .content(test_record)
+        .await
+        .context("v8→v9: failed to write test edge with flow_type")
+        .map(|r: Option<serde_json::Value>| r)?;
+
+    // Readback to confirm flow_type persisted
+    #[derive(Deserialize)]
+    struct TestEdge {
+        flow_type: Option<String>,
+    }
+    let readback: Option<TestEdge> = db
+        .select(("calls", test_id.as_str()))
+        .await
+        .context("v8→v9: failed to read back test edge")?;
+
+    match readback {
+        Some(record) => {
+            if record.flow_type.as_deref() != Some("test_v9") {
+                anyhow::bail!(
+                    "v8→v9 validation failed: flow_type not persisted (got {:?})",
+                    record.flow_type
+                );
+            }
+        }
+        None => anyhow::bail!("v8→v9 validation failed: test edge not found after write"),
+    }
+
+    // Cleanup test edge
+    let _: Option<serde_json::Value> = db.delete(("calls", test_id.as_str())).await?;
+
+    ops::set_meta(db, DB_SCHEMA_VERSION_KEY, "9")
+        .await
+        .context("v8→v9: stamp db_schema_version=9")?;
+
+    info!("migration v8→v9 complete");
+    Ok(())
+}
+
+pub async fn run_migration_v7_to_v8(db: &Surreal<Db>) -> Result<()> {
+    info!("migration v7→v8: multi-repo namespace enabled (diagnostic stamp, no DDL change)");
+    ops::set_meta(db, DB_SCHEMA_VERSION_KEY, "8")
+        .await
+        .context("migration v7→v8: stamp db_schema_version=8")?;
+    info!("migration v7→v8 complete");
+    Ok(())
+}
+
+pub async fn run_migration_v6_to_v7(db: &Surreal<Db>) -> Result<()> {
+    info!("migration v6→v7: adding calls.confidence column (no data backfill; NULL = Extracted)");
+    // The column definition is applied by SCHEMA_DDL on every open_db.
+    // This migration only advances the version stamp so the migration chain
+    // does not re-run on subsequent opens.
+    ops::set_meta(db, DB_SCHEMA_VERSION_KEY, "7")
+        .await
+        .context("migration v6→v7: stamp db_schema_version=7")?;
+    info!("migration v6→v7 complete");
     Ok(())
 }
 
