@@ -1,0 +1,27 @@
+{
+  "description": "Workflow integrity hooks",
+  "hooks": {
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/validate-workflow-action.py start",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 scripts/validate-subagent-result.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

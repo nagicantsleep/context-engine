@@ -4,4 +4,7 @@
 scripts/bin/harness
 scripts/bin/harness.exe
 
+# Claude Code temporary agent worktrees
+.claude/worktrees/
+
 .agents/skills/onboard-repository/scripts/__pycache__/

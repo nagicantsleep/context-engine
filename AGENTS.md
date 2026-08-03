@@ -73,3 +73,136 @@ cargo test                       # run test suite
 | Settings | `~/.vibervn/context-engine/settings.json` |
 | Per-repo SurrealDB | `~/.vibervn/context-engine/rocksdb/<name>/` |
 | Embedding cache | `~/.vibervn/context-engine/embeddings/` |
+
+## Multi-agent engineering workflow
+
+Codex project roles live under `.codex/agents/`. Claude Code roles live under
+`.claude/agents/`. Product authority remains `docs/WORKFLOW.md`.
+
+### Main-thread responsibility
+
+The main Codex thread is the user-facing orchestrator and task-leader state
+machine.
+
+The main thread owns:
+
+- communication with the user;
+- TaskContract creation;
+- task status and priorities;
+- adaptive workflow routing;
+- worker budgets;
+- acceptance criteria;
+- final reporting.
+
+The main thread should not perform routine exploration, implementation, long
+test runs, or raw-log analysis itself.
+
+### Core principle
+
+Do not delegate an entire engineering task to one premium reasoning agent.
+
+Premium agents make bounded decisions.
+Lower-cost agents perform bounded operations.
+An independent agent verifies the result.
+
+### TaskContract
+
+Before changing code, maintain this internal contract:
+
+```text
+task_id:
+objective:
+reported_symptoms:
+expected_behavior:
+constraints:
+acceptance_criteria:
+allowed_scope:
+prohibited_actions:
+risk: low | medium | high | critical
+uncertainty: low | medium | high
+budget:
+  max_parallel_agents:
+  max_sol_calls:
+  max_repair_loops:
+  max_files_changed:
+```
+
+### Adaptive workflow
+
+Select the smallest sufficient workflow.
+
+#### Clear, low-risk change
+
+`scoped_executor` -> `semantic_verifier`
+
+#### Unknown file or code path
+
+`task_explorer` -> `scoped_executor` -> `semantic_verifier`
+
+#### Runtime failure
+
+`task_explorer` + `task_reproducer`
+-> `standard_executor`
+-> `test_runner`
+-> `semantic_verifier`
+
+#### Unknown or ambiguous root cause
+
+`task_explorer` + `task_reproducer`
+-> `decision_specialist`
+-> `scoped_executor` or `standard_executor`
+-> `test_runner`
+-> `semantic_verifier`
+
+#### Architecture or critical change
+
+`task_explorer` agents where independent evidence is useful
+-> `decision_specialist`
+-> `standard_executor` or exceptional complex implementation
+-> `test_runner`
+-> `critical_reviewer`
+
+### Role boundaries
+
+- `task_explorer`: EvidencePack only. No edits. No broad redesigns.
+- `task_reproducer`: ReproductionReport only. No application source edits.
+- `decision_specialist`: DecisionRecord only. Never implement.
+- `scoped_executor`: small approved ChangeManifest. No redesign.
+- `standard_executor`: bounded multi-file ChangeManifest. No scope expansion.
+- `test_runner`: TestReport only. No application edits.
+- `semantic_verifier`: VerificationReport only. No code changes.
+- `critical_reviewer`: CriticalReviewReport only. No code changes.
+
+### Cost controls
+
+- Do not call `decision_specialist` before evidence collection.
+- Default Sol call budget is zero for low-risk tasks.
+- Medium-risk tasks may use one Sol call.
+- High-risk tasks may use one Sol decision call and one Sol critical review.
+- Do not call Sol twice with unchanged evidence.
+- Do not use Sol for raw tool loops or log processing.
+- Do not spawn an agent for work requiring only one or two focused reads.
+- Use no more than four concurrent agents by default.
+- Permit no more than one implementation agent to write to one checkout.
+- Permit at most one repair loop by default.
+
+### Repair loop
+
+When verification fails:
+
+1. Produce a FailurePacket.
+2. Return the FailurePacket to the original executor.
+3. Allow one bounded correction.
+4. Run verifier again.
+5. If the second verification fails, report BLOCKED.
+
+Do not call a new implementation agent unless the original executor is
+unavailable or the failure demonstrates that the original DecisionRecord was
+invalid.
+
+### User communication
+
+Acknowledge the task before delegation.
+Report only meaningful state changes.
+Keep raw logs and agent transcripts outside the user-facing conversation.
+The main thread owns the final answer.

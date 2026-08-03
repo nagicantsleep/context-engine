@@ -1,0 +1,53 @@
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "forbidden",
+    justification = "Agents must not push branches. Return the local diff for human review.",
+)
+
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    justification = "Destructive Git reset is prohibited. Use a new worktree or restore selected files.",
+)
+
+prefix_rule(
+    pattern = ["git", "clean"],
+    decision = "prompt",
+    justification = "Cleaning untracked files can remove user work.",
+)
+
+prefix_rule(
+    pattern = ["git", "commit"],
+    decision = "prompt",
+    justification = "Commits require explicit approval.",
+)
+
+prefix_rule(
+    pattern = ["npm", "publish"],
+    decision = "forbidden",
+    justification = "Publishing packages is outside the implementation workflow.",
+)
+
+prefix_rule(
+    pattern = ["pnpm", "publish"],
+    decision = "forbidden",
+    justification = "Publishing packages is outside the implementation workflow.",
+)
+
+prefix_rule(
+    pattern = ["terraform", "apply"],
+    decision = "forbidden",
+    justification = "Infrastructure changes require a separate approved deployment workflow.",
+)
+
+prefix_rule(
+    pattern = ["kubectl", "delete"],
+    decision = "forbidden",
+    justification = "Destructive cluster actions are prohibited.",
+)
+
+prefix_rule(
+    pattern = ["rm", "-rf"],
+    decision = "prompt",
+    justification = "Recursive deletion requires review.",
+)

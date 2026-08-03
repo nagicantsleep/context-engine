@@ -1,0 +1,27 @@
+#:schema https://developers.openai.com/codex/config-schema.json
+
+# Main thread:
+# - giao tiếp với user;
+# - quản lý TaskContract;
+# - điều phối các role;
+# - không trực tiếp thực thi implementation thông thường.
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+
+# Native workflow cần workspace-write ở parent để executor có thể ghi.
+# Các read-only agent sẽ hạ sandbox xuống read-only trong agent file riêng.
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[agents]
+enabled = true
+
+# Giới hạn fan-out.
+max_concurrent_threads_per_session = 4
+
+# Agent không được pin model rõ sẽ rơi về Luna.
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "medium"
+
+# Giữ thông báo khi agent bị interrupt để main thread nhận biết.
+interrupt_message = true
