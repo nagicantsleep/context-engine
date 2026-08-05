@@ -487,21 +487,121 @@ fn make_symbol(
     }
 }
 
-// ─── Python extractor ─────────────────────────────────────────────────────
+// ─── Data-flow descriptor ─────────────────────────────────────────────────
+//
+// Six near-duplicate per-language functions (param-forward edges, call
+// scanning, intermediate let/assignment flow) collapse into three generic
+// functions driven by a per-language `FlowSpec`. Node access differs across
+// grammars: some expose the callee/argument-list via named fields (Rust,
+// Python), others via a positional child with no field name (e.g. Swift,
+// Kotlin) — hence `NodeRef`. Some grammars wrap a bare identifier argument
+// in a wrapper node (e.g. C#, PHP) — hence `arg_unwrap_kinds`.
 
-fn extract_python(
-    file: &str,
-    source: &str,
-    tree: &tree_sitter::Tree,
-) -> (Vec<Symbol>, Vec<RawEdge>) {
-    let mut symbols = Vec::new();
-    let mut edges = Vec::new();
-    let root = tree.root_node();
-    extract_python_node(file, source, &root, &[], None, &mut symbols, &mut edges);
-    (symbols, edges)
+#[derive(Clone, Copy)]
+enum NodeRef {
+    /// Reachable via `child_by_field_name`.
+    Field(&'static str),
+    /// Reachable via positional `child(index)` (no field name in the grammar).
+    ///
+    /// Unused until Swift/Kotlin land — their grammars expose the callee
+    /// positionally (child index 0, no field name) rather than via a named
+    /// field.
+    #[allow(dead_code)]
+    Child(usize),
 }
 
-fn collect_param_forward_edges_python<'a>(
+impl NodeRef {
+    fn resolve<'a>(&self, node: &Node<'a>) -> Option<Node<'a>> {
+        match self {
+            NodeRef::Field(name) => node.child_by_field_name(*name),
+            NodeRef::Child(idx) => node.child(*idx),
+        }
+    }
+}
+
+struct FlowSpec {
+    /// AST node kind representing a call expression.
+    call_kind: &'static str,
+    /// How to reach the callee node from a call node.
+    callee: NodeRef,
+    /// How to reach the argument-list node from a call node.
+    args: NodeRef,
+    /// Wrapper kinds to descend through when looking for a bare identifier
+    /// argument (e.g. C# `argument`, PHP `argument` -> `variable_name`).
+    /// Empty means arguments are bare identifiers directly.
+    arg_unwrap_kinds: &'static [&'static str],
+    /// AST node kinds representing a local variable binding statement
+    /// (e.g. Rust `let_declaration`, Python `assignment`).
+    binding_kinds: &'static [&'static str],
+    /// Field name for the bound variable name on a binding node.
+    lhs_field: &'static str,
+    /// Field name for the bound value on a binding node.
+    rhs_field: &'static str,
+    /// Wrapper statement kinds to unwrap before checking `binding_kinds`
+    /// (e.g. Python `expression_statement` wraps `assignment`).
+    stmt_unwrap: &'static [&'static str],
+    /// AST node kind(s) considered a bare identifier node.
+    param_ident_kinds: &'static [&'static str],
+}
+
+const RUST_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["let_declaration"],
+    lhs_field: "pattern",
+    rhs_field: "value",
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
+};
+
+const PYTHON_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment"],
+    lhs_field: "left",
+    rhs_field: "right",
+    stmt_unwrap: &["expression_statement"],
+    param_ident_kinds: &["identifier"],
+};
+
+/// Resolve a call argument node to the identifier it refers to, descending
+/// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
+fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
+    if spec.param_ident_kinds.contains(&node.kind()) {
+        return Some(node);
+    }
+    if spec.arg_unwrap_kinds.contains(&node.kind()) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(found) = resolve_ident_arg(child, spec) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a statement to the binding node it represents, unwrapping
+/// `stmt_unwrap` wrapper kinds first (e.g. Python's `expression_statement`).
+fn resolve_binding<'a>(stmt: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
+    let candidate = if spec.stmt_unwrap.contains(&stmt.kind()) {
+        stmt.child(0)?
+    } else {
+        stmt
+    };
+    if spec.binding_kinds.contains(&candidate.kind()) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn collect_param_forward_edges<'a>(
+    spec: &FlowSpec,
     _file: &str,
     source: &str,
     node: &Node<'a>,
@@ -509,13 +609,15 @@ fn collect_param_forward_edges_python<'a>(
     from_sym: &QualifiedSymbol,
     edges: &mut Vec<RawEdge>,
 ) {
-    if node.kind() == "call" {
-        if let Some(func_node) = node.child_by_field_name("function") {
+    if node.kind() == spec.call_kind {
+        if let Some(func_node) = spec.callee.resolve(node) {
             let callee_name = node_text(&func_node, source).to_string();
-            if let Some(args_node) = node.child_by_field_name("arguments") {
+            if let Some(args_node) = spec.args.resolve(node) {
                 let mut acursor = args_node.walk();
                 let forwards_param = args_node.children(&mut acursor).any(|child| {
-                    child.kind() == "identifier" && param_names.contains(node_text(&child, source))
+                    resolve_ident_arg(child, spec)
+                        .map(|id| param_names.contains(node_text(&id, source)))
+                        .unwrap_or(false)
                 });
                 if forwards_param {
                     edges.push(RawEdge {
@@ -535,25 +637,26 @@ fn collect_param_forward_edges_python<'a>(
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_param_forward_edges_python(_file, source, &child, param_names, from_sym, edges);
+        collect_param_forward_edges(spec, _file, source, &child, param_names, from_sym, edges);
     }
 }
 
-fn scan_calls_python(
+fn scan_calls(
+    spec: &FlowSpec,
     source: &str,
     node: &Node,
-    var_map: &std::collections::HashMap<String, (String, usize)>,
+    var_map: &HashMap<String, (String, usize)>,
     from_sym: &QualifiedSymbol,
     edges: &mut Vec<RawEdge>,
 ) {
-    if node.kind() == "call" {
-        if let Some(func_node) = node.child_by_field_name("function") {
+    if node.kind() == spec.call_kind {
+        if let Some(func_node) = spec.callee.resolve(node) {
             let callee = node_text(&func_node, source).to_string();
-            if let Some(args_node) = node.child_by_field_name("arguments") {
+            if let Some(args_node) = spec.args.resolve(node) {
                 let mut acursor = args_node.walk();
                 for arg in args_node.children(&mut acursor) {
-                    if arg.kind() == "identifier" {
-                        let arg_name = node_text(&arg, source);
+                    if let Some(id) = resolve_ident_arg(arg, spec) {
+                        let arg_name = node_text(&id, source);
                         if var_map.contains_key(arg_name) {
                             let line = node_line_start(node);
                             edges.push(RawEdge {
@@ -576,54 +679,42 @@ fn scan_calls_python(
     } else {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            scan_calls_python(source, &child, var_map, from_sym, edges);
+            scan_calls(spec, source, &child, var_map, from_sym, edges);
         }
     }
 }
 
-fn collect_intermediate_flow_edges_python<'a>(
+fn collect_intermediate_flow_edges<'a>(
+    spec: &FlowSpec,
     _file: &str,
     source: &str,
     node: &Node<'a>,
     from_sym: &QualifiedSymbol,
     edges: &mut Vec<RawEdge>,
 ) {
-    let mut var_map: std::collections::HashMap<String, (String, usize)> =
-        std::collections::HashMap::new();
+    let mut var_map: HashMap<String, (String, usize)> = HashMap::new();
 
     let mut cursor = node.walk();
     for stmt in node.children(&mut cursor) {
-        // In tree-sitter-python the body block may yield `expression_statement` wrappers
-        // around `assignment` nodes rather than bare `assignment` nodes.  Unwrap one level
-        // so both representations are handled.
-        let assign_node = if stmt.kind() == "expression_statement" {
-            stmt.child(0).filter(|c| c.kind() == "assignment")
-        } else if stmt.kind() == "assignment" {
-            Some(stmt)
-        } else {
-            None
-        };
-
-        if let Some(ref asgn) = assign_node {
+        if let Some(asgn) = resolve_binding(stmt, spec) {
             let var_name = asgn
-                .child_by_field_name("left")
-                .filter(|p| p.kind() == "identifier")
-                .as_ref()
-                .map(|p| node_text(p, source).to_string());
+                .child_by_field_name(spec.lhs_field)
+                .filter(|p| spec.param_ident_kinds.contains(&p.kind()))
+                .map(|p| node_text(&p, source).to_string());
             let rhs_callee = asgn
-                .child_by_field_name("right")
-                .filter(|v| v.kind() == "call")
-                .and_then(|v| v.child_by_field_name("function"))
+                .child_by_field_name(spec.rhs_field)
+                .filter(|v| v.kind() == spec.call_kind)
+                .and_then(|v| spec.callee.resolve(&v))
                 .map(|f| node_text(&f, source).to_string());
 
             if let (Some(var), Some(callee)) = (var_name, rhs_callee) {
                 let mut chain_depth = 1usize;
-                if let Some(rhs_node) = asgn.child_by_field_name("right") {
-                    if let Some(args_node) = rhs_node.child_by_field_name("arguments") {
+                if let Some(rhs_node) = asgn.child_by_field_name(spec.rhs_field) {
+                    if let Some(args_node) = spec.args.resolve(&rhs_node) {
                         let mut acursor = args_node.walk();
                         for arg in args_node.children(&mut acursor) {
-                            if arg.kind() == "identifier" {
-                                let arg_name = node_text(&arg, source);
+                            if let Some(id) = resolve_ident_arg(arg, spec) {
+                                let arg_name = node_text(&id, source);
                                 if let Some((_src_callee, depth)) = var_map.get(arg_name) {
                                     let line = node_line_start(&rhs_node);
                                     edges.push(RawEdge {
@@ -649,9 +740,23 @@ fn collect_intermediate_flow_edges_python<'a>(
                 }
             }
         } else {
-            scan_calls_python(source, &stmt, &var_map, from_sym, edges);
+            scan_calls(spec, source, &stmt, &var_map, from_sym, edges);
         }
     }
+}
+
+// ─── Python extractor ─────────────────────────────────────────────────────
+
+fn extract_python(
+    file: &str,
+    source: &str,
+    tree: &tree_sitter::Tree,
+) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let root = tree.root_node();
+    extract_python_node(file, source, &root, &[], None, &mut symbols, &mut edges);
+    (symbols, edges)
 }
 
 fn extract_python_node(
@@ -711,7 +816,8 @@ fn extract_python_node(
                 }
                 if !param_names.is_empty() {
                     if let Some(body_node) = node.child_by_field_name("body") {
-                        collect_param_forward_edges_python(
+                        collect_param_forward_edges(
+                            &PYTHON_FLOW_SPEC,
                             file,
                             source,
                             &body_node,
@@ -722,8 +828,13 @@ fn extract_python_node(
                     }
                 }
                 if let Some(body_node) = node.child_by_field_name("body") {
-                    collect_intermediate_flow_edges_python(
-                        file, source, &body_node, &func_sym, edges,
+                    collect_intermediate_flow_edges(
+                        &PYTHON_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
                     );
                 }
 
@@ -1027,147 +1138,6 @@ fn extract_rust(file: &str, source: &str, tree: &tree_sitter::Tree) -> (Vec<Symb
     (symbols, edges)
 }
 
-fn collect_param_forward_edges_rust<'a>(
-    _file: &str,
-    source: &str,
-    node: &Node<'a>,
-    param_names: &HashSet<&str>,
-    from_sym: &QualifiedSymbol,
-    edges: &mut Vec<RawEdge>,
-) {
-    if node.kind() == "call_expression" {
-        if let Some(func_node) = node.child_by_field_name("function") {
-            let callee_name = node_text(&func_node, source).to_string();
-            if let Some(args_node) = node.child_by_field_name("arguments") {
-                let mut acursor = args_node.walk();
-                let forwards_param = args_node.children(&mut acursor).any(|child| {
-                    child.kind() == "identifier" && param_names.contains(node_text(&child, source))
-                });
-                if forwards_param {
-                    edges.push(RawEdge {
-                        from: from_sym.clone(),
-                        to: EdgeTarget::Unresolved {
-                            name: callee_name,
-                            import_path: None,
-                            qualifier: None,
-                        },
-                        kind: EdgeKind::DataFlowsTo,
-                        line: node_line_start(node),
-                        confidence: Confidence::Inferred(0.75),
-                    });
-                }
-            }
-        }
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_param_forward_edges_rust(_file, source, &child, param_names, from_sym, edges);
-    }
-}
-
-fn scan_calls_rust(
-    source: &str,
-    node: &Node,
-    var_map: &std::collections::HashMap<String, (String, usize)>,
-    from_sym: &QualifiedSymbol,
-    edges: &mut Vec<RawEdge>,
-) {
-    if node.kind() == "call_expression" {
-        if let Some(func_node) = node.child_by_field_name("function") {
-            let callee = node_text(&func_node, source).to_string();
-            if let Some(args_node) = node.child_by_field_name("arguments") {
-                let mut acursor = args_node.walk();
-                for arg in args_node.children(&mut acursor) {
-                    if arg.kind() == "identifier" {
-                        let arg_name = node_text(&arg, source);
-                        if var_map.contains_key(arg_name) {
-                            let line = node_line_start(node);
-                            edges.push(RawEdge {
-                                from: from_sym.clone(),
-                                to: EdgeTarget::Unresolved {
-                                    name: callee.clone(),
-                                    import_path: None,
-                                    qualifier: None,
-                                },
-                                kind: EdgeKind::DataFlowsTo,
-                                line,
-                                confidence: Confidence::Inferred(0.6),
-                            });
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            scan_calls_rust(source, &child, var_map, from_sym, edges);
-        }
-    }
-}
-
-fn collect_intermediate_flow_edges_rust<'a>(
-    _file: &str,
-    source: &str,
-    node: &Node<'a>,
-    from_sym: &QualifiedSymbol,
-    edges: &mut Vec<RawEdge>,
-) {
-    let mut var_map: std::collections::HashMap<String, (String, usize)> =
-        std::collections::HashMap::new();
-
-    let mut cursor = node.walk();
-    for stmt in node.children(&mut cursor) {
-        if stmt.kind() == "let_declaration" {
-            let var_name = stmt
-                .child_by_field_name("pattern")
-                .filter(|p| p.kind() == "identifier")
-                .map(|p| node_text(&p, source).to_string());
-            let rhs_callee = stmt
-                .child_by_field_name("value")
-                .filter(|v| v.kind() == "call_expression")
-                .and_then(|v| v.child_by_field_name("function"))
-                .map(|f| node_text(&f, source).to_string());
-
-            if let (Some(var), Some(callee)) = (var_name, rhs_callee) {
-                let mut chain_depth = 1usize;
-                if let Some(value_node) = stmt.child_by_field_name("value") {
-                    if let Some(args_node) = value_node.child_by_field_name("arguments") {
-                        let mut acursor = args_node.walk();
-                        for arg in args_node.children(&mut acursor) {
-                            if arg.kind() == "identifier" {
-                                let arg_name = node_text(&arg, source);
-                                if let Some((_src_callee, depth)) = var_map.get(arg_name) {
-                                    let line = node_line_start(&value_node);
-                                    edges.push(RawEdge {
-                                        from: from_sym.clone(),
-                                        to: EdgeTarget::Unresolved {
-                                            name: callee.clone(),
-                                            import_path: None,
-                                            qualifier: None,
-                                        },
-                                        kind: EdgeKind::DataFlowsTo,
-                                        line,
-                                        confidence: Confidence::Inferred(0.6),
-                                    });
-                                    chain_depth = depth + 1;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if chain_depth <= 3 {
-                    var_map.insert(var, (callee, chain_depth));
-                }
-            }
-        } else {
-            scan_calls_rust(source, &stmt, &var_map, from_sym, edges);
-        }
-    }
-}
-
 fn extract_rust_node(
     file: &str,
     source: &str,
@@ -1218,7 +1188,8 @@ fn extract_rust_node(
                 }
                 if !param_names.is_empty() {
                     if let Some(body_node) = node.child_by_field_name("body") {
-                        collect_param_forward_edges_rust(
+                        collect_param_forward_edges(
+                            &RUST_FLOW_SPEC,
                             file,
                             source,
                             &body_node,
@@ -1229,8 +1200,13 @@ fn extract_rust_node(
                     }
                 }
                 if let Some(body_node) = node.child_by_field_name("body") {
-                    collect_intermediate_flow_edges_rust(
-                        file, source, &body_node, &func_sym, edges,
+                    collect_intermediate_flow_edges(
+                        &RUST_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
                     );
                 }
                 let mut child_scope = scope.to_vec();
