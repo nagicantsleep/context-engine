@@ -634,6 +634,22 @@ const RUBY_FLOW_SPEC: FlowSpec = FlowSpec {
     param_ident_kinds: &["identifier"],
 };
 
+/// Java's `method_invocation` uses field `name` for the callee (not
+/// `function`), unlike Rust/Go/JS.
+const JAVA_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "method_invocation",
+    callee: NodeRef::Field("name"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["variable_declarator"],
+    lhs_field: "name",
+    rhs_field: "value",
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_variable_declaration"],
+    param_ident_kinds: &["identifier"],
+};
+
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
 fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
@@ -652,16 +668,18 @@ fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
 }
 
 /// Resolve a statement to the binding node it represents, unwrapping
-/// `stmt_unwrap` wrapper kinds first (e.g. Python's `expression_statement`).
+/// `stmt_unwrap` wrapper kinds first (e.g. Python's `expression_statement`)
+/// by scanning named children for the first one matching `binding_kinds`
+/// (e.g. skips Java's `type` field child to find `variable_declarator`).
 fn resolve_binding<'a>(stmt: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
-    let candidate = if spec.stmt_unwrap.contains(&stmt.kind()) {
+    if spec.stmt_unwrap.contains(&stmt.kind()) {
         let mut cursor = stmt.walk();
-        stmt.named_children(&mut cursor).next()?
-    } else {
-        stmt
-    };
-    if spec.binding_kinds.contains(&candidate.kind()) {
-        Some(candidate)
+        return stmt
+            .named_children(&mut cursor)
+            .find(|c| spec.binding_kinds.contains(&c.kind()));
+    }
+    if spec.binding_kinds.contains(&stmt.kind()) {
+        Some(stmt)
     } else {
         None
     }
@@ -1741,7 +1759,42 @@ fn extract_java_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params_node) = node.child_by_field_name("parameters") {
+                    let mut pcursor = params_node.walk();
+                    for param in params_node.children(&mut pcursor) {
+                        if param.kind() == "formal_parameter" {
+                            if let Some(ident) = param.child_by_field_name("name") {
+                                param_names.insert(node_text(&ident, source));
+                            }
+                        }
+                    }
+                }
+                if !param_names.is_empty() {
+                    if let Some(body_node) = node.child_by_field_name("body") {
+                        collect_param_forward_edges(
+                            &JAVA_FLOW_SPEC,
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    collect_intermediate_flow_edges(
+                        &JAVA_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
+                    );
+                }
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor = node.walk();
@@ -5671,6 +5724,52 @@ mod ruby_param_forward_tests {
 }
 
 #[cfg(test)]
+mod java_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_single_param() {
+        let src = "class C { void outer(int x) { inner(x); } }";
+        let result = parse_file("test.java", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = "class C { void outer(int x) { inner(42); } }";
+        let result = parse_file("test.java", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+
+    #[test]
+    fn forwards_two_params() {
+        let src = "class C { void outer(int a, int b) { one(a); two(b); } }";
+        let result = parse_file("test.java", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod rust_intermediate_flow_tests {
     use super::*;
 
@@ -5846,6 +5945,59 @@ mod ruby_intermediate_flow_tests {
     fn intermediate_variable_flow() {
         let src = "def f\n  y = foo()\n  bar(y)\nend\n";
         let result = parse_file("test.rb", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+}
+
+#[cfg(test)]
+mod java_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn intermediate_variable_flow() {
+        let src = "class C { void f() { int y = foo(); bar(y); } }";
+        let result = parse_file("test.java", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn intermediate_variable_flow_object_type() {
+        let src = "class C { void f() { String y = foo(); bar(y); } }";
+        let result = parse_file("test.java", src);
         let df: Vec<_> = result
             .edges
             .iter()
