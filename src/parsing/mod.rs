@@ -617,6 +617,23 @@ const JS_FLOW_SPEC: FlowSpec = FlowSpec {
     param_ident_kinds: &["identifier"],
 };
 
+/// Ruby's `call` node uses `method`/`arguments` fields (not `function`) and
+/// `assignment` sits directly under the enclosing statement, so no
+/// `stmt_unwrap` is needed.
+const RUBY_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call",
+    callee: NodeRef::Field("method"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment"],
+    lhs_field: "left",
+    rhs_field: "right",
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
+};
+
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
 fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
@@ -2828,7 +2845,40 @@ fn extract_ruby_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params_node) = node.child_by_field_name("parameters") {
+                    let mut pcursor = params_node.walk();
+                    for param in params_node.children(&mut pcursor) {
+                        if param.kind() == "identifier" {
+                            param_names.insert(node_text(&param, source));
+                        }
+                    }
+                }
+                if !param_names.is_empty() {
+                    if let Some(body_node) = node.child_by_field_name("body") {
+                        collect_param_forward_edges(
+                            &RUBY_FLOW_SPEC,
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    collect_intermediate_flow_edges(
+                        &RUBY_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
+                    );
+                }
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor = node.walk();
@@ -5563,6 +5613,64 @@ mod js_param_forward_tests {
 }
 
 #[cfg(test)]
+mod ruby_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_single_param() {
+        let src = "def outer(x)\n  inner(x)\nend\n";
+        let result = parse_file("test.rb", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = "def outer(x)\n  inner(42)\nend\n";
+        let result = parse_file("test.rb", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+
+    #[test]
+    fn forwards_two_params() {
+        let src = "def outer(a, b)\n  one(a)\n  two(b)\nend\n";
+        let result = parse_file("test.rb", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 2);
+    }
+
+    #[test]
+    fn no_params_no_panic() {
+        let src = "def f\n  bar\nend\n";
+        let result = parse_file("test.rb", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod rust_intermediate_flow_tests {
     use super::*;
 
@@ -5709,6 +5817,35 @@ mod js_intermediate_flow_tests {
     fn intermediate_variable_flow_var() {
         let src = "function f() {\n  var y = foo();\n  bar(y);\n}\n";
         let result = parse_file("test.js", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+}
+
+#[cfg(test)]
+mod ruby_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn intermediate_variable_flow() {
+        let src = "def f\n  y = foo()\n  bar(y)\nend\n";
+        let result = parse_file("test.rb", src);
         let df: Vec<_> = result
             .edges
             .iter()
