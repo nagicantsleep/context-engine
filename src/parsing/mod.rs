@@ -600,6 +600,23 @@ const GO_FLOW_SPEC: FlowSpec = FlowSpec {
     param_ident_kinds: &["identifier"],
 };
 
+/// JavaScript's `variable_declarator` sits directly under `lexical_declaration`
+/// (`let`/`const`) or `variable_declaration` (`var`). One spec serves JS,
+/// TypeScript, Tsx and Svelte, since those extractors delegate to the JS one.
+const JS_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["variable_declarator"],
+    lhs_field: "name",
+    rhs_field: "value",
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["lexical_declaration", "variable_declaration"],
+    param_ident_kinds: &["identifier"],
+};
+
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
 fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
@@ -621,7 +638,8 @@ fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
 /// `stmt_unwrap` wrapper kinds first (e.g. Python's `expression_statement`).
 fn resolve_binding<'a>(stmt: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
     let candidate = if spec.stmt_unwrap.contains(&stmt.kind()) {
-        stmt.child(0)?
+        let mut cursor = stmt.walk();
+        stmt.named_children(&mut cursor).next()?
     } else {
         stmt
     };
@@ -1060,7 +1078,40 @@ fn extract_js_node(
                 parent_fqn.map(|s| s.to_string()),
             );
             let fqn = sym.qualified.fqn();
+            let func_sym = sym.qualified.clone();
             symbols.push(sym);
+            let mut param_names: HashSet<&str> = HashSet::new();
+            if let Some(params_node) = node.child_by_field_name("parameters") {
+                let mut pcursor = params_node.walk();
+                for param in params_node.children(&mut pcursor) {
+                    if param.kind() == "identifier" {
+                        param_names.insert(node_text(&param, source));
+                    }
+                }
+            }
+            if !param_names.is_empty() {
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    collect_param_forward_edges(
+                        &JS_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &param_names,
+                        &func_sym,
+                        edges,
+                    );
+                }
+            }
+            if let Some(body_node) = node.child_by_field_name("body") {
+                collect_intermediate_flow_edges(
+                    &JS_FLOW_SPEC,
+                    file,
+                    source,
+                    &body_node,
+                    &func_sym,
+                    edges,
+                );
+            }
             let mut child_scope = scope.to_vec();
             child_scope.push(name);
             let mut cursor = node.walk();
@@ -5466,6 +5517,52 @@ mod go_param_forward_tests {
 }
 
 #[cfg(test)]
+mod js_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_single_param() {
+        let src = "function outer(x) {\n  inner(x);\n}\n";
+        let result = parse_file("test.js", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = "function outer(x) {\n  inner(42);\n}\n";
+        let result = parse_file("test.js", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+
+    #[test]
+    fn forwards_two_params() {
+        let src = "function outer(a, b) {\n  one(a);\n  two(b);\n}\n";
+        let result = parse_file("test.js", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod rust_intermediate_flow_tests {
     use super::*;
 
@@ -5559,6 +5656,59 @@ mod go_intermediate_flow_tests {
     fn intermediate_variable_flow() {
         let src = "package main\n\nfunc f() {\n\ty := foo()\n\tbar(y)\n}\n";
         let result = parse_file("test.go", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+}
+
+#[cfg(test)]
+mod js_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn intermediate_variable_flow_let() {
+        let src = "function f() {\n  let y = foo();\n  bar(y);\n}\n";
+        let result = parse_file("test.js", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn intermediate_variable_flow_var() {
+        let src = "function f() {\n  var y = foo();\n  bar(y);\n}\n";
+        let result = parse_file("test.js", src);
         let df: Vec<_> = result
             .edges
             .iter()
