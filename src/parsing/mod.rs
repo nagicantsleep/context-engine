@@ -537,6 +537,18 @@ struct FlowSpec {
     lhs_field: &'static str,
     /// Field name for the bound value on a binding node.
     rhs_field: &'static str,
+    /// Wrapper kinds to descend through (via first named child) when the
+    /// `lhs_field` value is a single-element list wrapper rather than the
+    /// identifier directly (e.g. Go `short_var_declaration`'s `left` field
+    /// is an `expression_list` wrapping one `identifier`). Empty means the
+    /// field value is the identifier directly.
+    lhs_unwrap_kinds: &'static [&'static str],
+    /// Wrapper kinds to descend through (via first named child) when the
+    /// `rhs_field` value is a single-element list wrapper rather than the
+    /// call expression directly (e.g. Go `short_var_declaration`'s `right`
+    /// field is an `expression_list` wrapping one call). Empty means the
+    /// field value is the call expression directly.
+    rhs_unwrap_kinds: &'static [&'static str],
     /// Wrapper statement kinds to unwrap before checking `binding_kinds`
     /// (e.g. Python `expression_statement` wraps `assignment`).
     stmt_unwrap: &'static [&'static str],
@@ -552,6 +564,8 @@ const RUST_FLOW_SPEC: FlowSpec = FlowSpec {
     binding_kinds: &["let_declaration"],
     lhs_field: "pattern",
     rhs_field: "value",
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
     stmt_unwrap: &[],
     param_ident_kinds: &["identifier"],
 };
@@ -564,7 +578,25 @@ const PYTHON_FLOW_SPEC: FlowSpec = FlowSpec {
     binding_kinds: &["assignment"],
     lhs_field: "left",
     rhs_field: "right",
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
     stmt_unwrap: &["expression_statement"],
+    param_ident_kinds: &["identifier"],
+};
+
+/// Go wraps `short_var_declaration` operands in `expression_list`, so both
+/// sides need unwrapping to reach the identifier and the call.
+const GO_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["short_var_declaration"],
+    lhs_field: "left",
+    rhs_field: "right",
+    lhs_unwrap_kinds: &["expression_list"],
+    rhs_unwrap_kinds: &["expression_list"],
+    stmt_unwrap: &[],
     param_ident_kinds: &["identifier"],
 };
 
@@ -597,6 +629,17 @@ fn resolve_binding<'a>(stmt: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
         Some(candidate)
     } else {
         None
+    }
+}
+
+/// Descend through a single list-wrapper node (e.g. Go `expression_list`) to
+/// reach the real operand. Empty `unwrap_kinds` means no descent.
+fn unwrap_operand<'a>(node: Node<'a>, unwrap_kinds: &[&str]) -> Option<Node<'a>> {
+    if unwrap_kinds.contains(&node.kind()) {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).next()
+    } else {
+        Some(node)
     }
 }
 
@@ -699,17 +742,22 @@ fn collect_intermediate_flow_edges<'a>(
         if let Some(asgn) = resolve_binding(stmt, spec) {
             let var_name = asgn
                 .child_by_field_name(spec.lhs_field)
+                .and_then(|p| unwrap_operand(p, spec.lhs_unwrap_kinds))
                 .filter(|p| spec.param_ident_kinds.contains(&p.kind()))
                 .map(|p| node_text(&p, source).to_string());
             let rhs_callee = asgn
                 .child_by_field_name(spec.rhs_field)
+                .and_then(|v| unwrap_operand(v, spec.rhs_unwrap_kinds))
                 .filter(|v| v.kind() == spec.call_kind)
                 .and_then(|v| spec.callee.resolve(&v))
                 .map(|f| node_text(&f, source).to_string());
 
             if let (Some(var), Some(callee)) = (var_name, rhs_callee) {
                 let mut chain_depth = 1usize;
-                if let Some(rhs_node) = asgn.child_by_field_name(spec.rhs_field) {
+                if let Some(rhs_node) = asgn
+                    .child_by_field_name(spec.rhs_field)
+                    .and_then(|v| unwrap_operand(v, spec.rhs_unwrap_kinds))
+                {
                     if let Some(args_node) = spec.args.resolve(&rhs_node) {
                         let mut acursor = args_node.walk();
                         for arg in args_node.children(&mut acursor) {
@@ -1445,7 +1493,45 @@ fn extract_go_node(
                 parent_fqn.map(|s| s.to_string()),
             );
             let fqn = sym.qualified.fqn();
+            let func_sym = sym.qualified.clone();
             symbols.push(sym);
+            let mut param_names: HashSet<&str> = HashSet::new();
+            if let Some(params_node) = node.child_by_field_name("parameters") {
+                let mut pcursor = params_node.walk();
+                for param in params_node.children(&mut pcursor) {
+                    if param.kind() == "parameter_declaration" {
+                        let mut ncursor = param.walk();
+                        for ident in param.children(&mut ncursor) {
+                            if ident.kind() == "identifier" {
+                                param_names.insert(node_text(&ident, source));
+                            }
+                        }
+                    }
+                }
+            }
+            if !param_names.is_empty() {
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    collect_param_forward_edges(
+                        &GO_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &param_names,
+                        &func_sym,
+                        edges,
+                    );
+                }
+            }
+            if let Some(body_node) = node.child_by_field_name("body") {
+                collect_intermediate_flow_edges(
+                    &GO_FLOW_SPEC,
+                    file,
+                    source,
+                    &body_node,
+                    &func_sym,
+                    edges,
+                );
+            }
             let mut child_scope = scope.to_vec();
             child_scope.push(name);
             let mut cursor = node.walk();
@@ -5334,6 +5420,52 @@ mod python_param_forward_tests {
 }
 
 #[cfg(test)]
+mod go_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_single_param() {
+        let src = "package main\n\nfunc outer(x int) {\n\tinner(x)\n}\n";
+        let result = parse_file("test.go", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = "package main\n\nfunc outer(x int) {\n\tinner(42)\n}\n";
+        let result = parse_file("test.go", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+
+    #[test]
+    fn forwards_multiple_params() {
+        let src = "package main\n\nfunc outer(a, b int) {\n\tone(a)\n\ttwo(b)\n}\n";
+        let result = parse_file("test.go", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod rust_intermediate_flow_tests {
     use super::*;
 
@@ -5416,6 +5548,35 @@ mod python_intermediate_flow_tests {
             .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
             .collect();
         assert!(df.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod go_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn intermediate_variable_flow() {
+        let src = "package main\n\nfunc f() {\n\ty := foo()\n\tbar(y)\n}\n";
+        let result = parse_file("test.go", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
     }
 }
 
