@@ -650,6 +650,23 @@ const JAVA_FLOW_SPEC: FlowSpec = FlowSpec {
     param_ident_kinds: &["identifier"],
 };
 
+/// Dart's `initialized_variable_definition` sits directly under
+/// `local_variable_declaration` (with `name`/`value` fields), and calls are
+/// `call_expression` with `function`/`arguments` fields like Rust and Go.
+const DART_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["initialized_variable_definition"],
+    lhs_field: "name",
+    rhs_field: "value",
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_variable_declaration"],
+    param_ident_kinds: &["identifier"],
+};
+
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
 fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
@@ -3657,6 +3674,18 @@ fn dart_find_function_name(node: &Node, source: &str) -> Option<String> {
             if let Some(n) = child.child_by_field_name("name") {
                 return Some(node_text(&n, source).to_string());
             }
+            // A method_signature wraps its function_signature as a named child.
+            if child.kind() == "method_signature" {
+                let mut signature_cursor = child.walk();
+                if let Some(function_signature) = child
+                    .children(&mut signature_cursor)
+                    .find(|c| c.kind() == "function_signature")
+                {
+                    if let Some(n) = function_signature.child_by_field_name("name") {
+                        return Some(node_text(&n, source).to_string());
+                    }
+                }
+            }
             // Try positional identifier
             let mut inner_cursor = child.walk();
             for inner in child.children(&mut inner_cursor) {
@@ -3718,7 +3747,64 @@ fn extract_dart_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(sig_node) = node.child_by_field_name("signature") {
+                    // `function_declaration`'s signature IS a `function_signature`
+                    // (has `parameters` directly); `method_declaration`'s signature
+                    // is a `method_signature` wrapping a `function_signature` child.
+                    let fn_sig = if sig_node.child_by_field_name("parameters").is_some() {
+                        Some(sig_node)
+                    } else {
+                        let mut scursor = sig_node.walk();
+                        sig_node
+                            .children(&mut scursor)
+                            .find(|c| c.kind() == "function_signature")
+                    };
+                    if let Some(fn_sig) = fn_sig {
+                        if let Some(params_node) = fn_sig.child_by_field_name("parameters") {
+                            let mut pcursor = params_node.walk();
+                            for param in params_node.children(&mut pcursor) {
+                                if param.kind() == "formal_parameter" {
+                                    if let Some(ident) = param.child_by_field_name("name") {
+                                        param_names.insert(node_text(&ident, source));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !param_names.is_empty() {
+                    if let Some(body_node) = node.child_by_field_name("body") {
+                        collect_param_forward_edges(
+                            &DART_FLOW_SPEC,
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                }
+                // `function_body` wraps the real statements in a `block` child
+                // (absent for arrow bodies `=> expr;`); descend to it so
+                // `collect_intermediate_flow_edges` (which only looks at direct
+                // children) actually sees the statements.
+                if let Some(block_node) = node.child_by_field_name("body").and_then(|body| {
+                    let mut bcursor = body.walk();
+                    body.children(&mut bcursor).find(|c| c.kind() == "block")
+                }) {
+                    collect_intermediate_flow_edges(
+                        &DART_FLOW_SPEC,
+                        file,
+                        source,
+                        &block_node,
+                        &func_sym,
+                        edges,
+                    );
+                }
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor = node.walk();
@@ -5770,6 +5856,69 @@ mod java_param_forward_tests {
 }
 
 #[cfg(test)]
+mod dart_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_param_top_level_function() {
+        let src = "void outer(int x) { inner(x); }";
+        let result = parse_file("test.dart", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn forwards_param_class_method() {
+        let src = "class C { void outer(int x) { inner(x); } }";
+        let result = parse_file("test.dart", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = "void outer(int x) { inner(42); }";
+        let result = parse_file("test.dart", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+
+    #[test]
+    fn forwards_two_params() {
+        let src = "void outer(int a, int b) { one(a); two(b); }";
+        let result = parse_file("test.dart", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod rust_intermediate_flow_tests {
     use super::*;
 
@@ -6015,6 +6164,75 @@ mod java_intermediate_flow_tests {
             names.contains(&"bar") || names.contains(&"foo"),
             "expected edge to bar or foo, got {:?}",
             names
+        );
+    }
+}
+
+#[cfg(test)]
+mod dart_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn intermediate_variable_flow_typed() {
+        let src = "void f() { int y = foo(); bar(y); }";
+        let result = parse_file("test.dart", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn intermediate_variable_flow_var() {
+        let src = "void f() { var y = foo(); bar(y); }";
+        let result = parse_file("test.dart", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"bar") || names.contains(&"foo"),
+            "expected edge to bar or foo, got {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn arrow_body_no_panic() {
+        let src = "int f() => foo();";
+        let result = parse_file("test.dart", src);
+        let df: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(
+            df.is_empty(),
+            "arrow body has no block; expected no DataFlowsTo edge, got {:?}",
+            df.len()
         );
     }
 }
