@@ -666,6 +666,20 @@ const DART_FLOW_SPEC: FlowSpec = FlowSpec {
     stmt_unwrap: &["local_variable_declaration"],
     param_ident_kinds: &["identifier"],
 };
+const PASCAL_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "exprCall",
+    callee: NodeRef::Field("entity"),
+    args: NodeRef::Field("args"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment"],
+    lhs_field: "lhs",
+    rhs_field: "rhs",
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
+};
+
 
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
@@ -4283,6 +4297,46 @@ fn extract_pascal_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(header_node) = node.child_by_field_name("header") {
+                    if let Some(args_node) = header_node.child_by_field_name("args") {
+                        let mut acursor = args_node.walk();
+                        for arg in args_node.children(&mut acursor) {
+                            if arg.kind() == "declArg" {
+                                if let Some(name_node) = arg.child_by_field_name("name") {
+                                    if PASCAL_FLOW_SPEC
+                                        .param_ident_kinds
+                                        .contains(&name_node.kind())
+                                    {
+                                        param_names.insert(node_text(&name_node, source));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    if !param_names.is_empty() {
+                        collect_param_forward_edges(
+                            &PASCAL_FLOW_SPEC,
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                    collect_intermediate_flow_edges(
+                        &PASCAL_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
+                    );
+                }
                 symbols.push(sym);
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
@@ -4300,6 +4354,7 @@ fn extract_pascal_node(
                 }
             }
         }
+
         "declType" => {
             // field "name" on declType gives the type name
             let name = node
@@ -5391,6 +5446,105 @@ end;
                     .collect::<Vec<_>>()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pascal_param_forward_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_param_to_call() {
+        let src = r#"
+procedure Outer(x: Integer);
+begin
+  Inner(x);
+end;
+"#;
+        let result = parse_file("test.pas", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "Inner"),
+            _ => panic!("expected Unresolved"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_arg() {
+        let src = r#"
+procedure Outer(x: Integer);
+begin
+  Inner(42);
+end;
+"#;
+        let result = parse_file("test.pas", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(df_edges.is_empty());
+    }
+
+    #[test]
+    fn forwards_two_params() {
+        let src = r#"
+procedure Outer(a: Integer; b: Integer);
+begin
+  First(a);
+  Second(b);
+end;
+"#;
+        let result = parse_file("test.pas", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod pascal_intermediate_flow_tests {
+    use super::*;
+
+    #[test]
+    fn intermediate_variable_flow() {
+        let src = r#"
+procedure Outer;
+var
+  x: Integer;
+begin
+  x := Foo();
+  Bar(x);
+end;
+"#;
+        let result = parse_file("test.pas", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(!df_edges.is_empty(), "expected DataFlowsTo edge, got none");
+        let names: Vec<_> = df_edges
+            .iter()
+            .map(|e| match &e.to {
+                EdgeTarget::Unresolved { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            names.contains(&"Bar"),
+            "expected edge to Bar, got {:?}",
+            names
+        );
     }
 }
 
