@@ -607,6 +607,31 @@ const PHP_FLOW_SPEC: FlowSpec = FlowSpec {
     rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
     stmt_unwrap: &["expression_statement"], param_ident_kinds: &["variable_name"],
 };
+const C_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["init_declarator"], lhs_field: "declarator",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["declaration"], param_ident_kinds: &["identifier", "field_identifier"],
+};
+const C_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["assignment_expression"], lhs_field: "left",
+    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["identifier", "field_identifier"],
+};
+const CPP_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["init_declarator"], lhs_field: "declarator",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["declaration"], param_ident_kinds: &["identifier", "field_identifier"],
+};
+const CPP_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["assignment_expression"], lhs_field: "left",
+    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["identifier", "field_identifier"],
+};
+
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
 fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
@@ -1869,11 +1894,63 @@ fn qualified_scope_prefix(node: &Node, source: &str) -> Vec<String> {
     // We collect the scope chain into a flat Vec.
     let mut parts = Vec::new();
     collect_scope_parts(node, source, &mut parts);
-    // The last element is the name itself, not the scope prefix — drop it.
     if !parts.is_empty() {
         parts.pop();
     }
     parts
+}
+
+/// Collect parameter names from a C/C++ function declarator.
+fn c_cpp_param_names<'a>(
+    declarator: &Node<'a>,
+    source: &'a str,
+    spec: &FlowSpec,
+) -> HashSet<&'a str> {
+    let function_decl = if declarator.kind() == "function_declarator" {
+        Some(*declarator)
+    } else {
+        let mut cursor = declarator.walk();
+        declarator.named_children(&mut cursor).find_map(|child| {
+            if child.kind() == "function_declarator" {
+                Some(child)
+            } else {
+                None
+            }
+        })
+    };
+    let Some(function_decl) = function_decl else {
+        return HashSet::new();
+    };
+    let Some(parameters) = function_decl.child_by_field_name("parameters") else {
+        return HashSet::new();
+    };
+    let mut names = HashSet::new();
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        if parameter.kind() != "parameter_declaration" {
+            continue;
+        }
+        if let Some(parameter_decl) = parameter.child_by_field_name("declarator")
+            && let Some(name) = c_cpp_declarator_ident(&parameter_decl, source, spec)
+        {
+            names.insert(name);
+        }
+    }
+    names
+}
+
+fn c_cpp_declarator_ident<'a>(
+    node: &Node<'a>,
+    source: &'a str,
+    spec: &FlowSpec,
+) -> Option<&'a str> {
+    let (name, _) = declarator_name(node, source)?;
+    if spec.param_ident_kinds.contains(&node.kind()) {
+        return Some(name);
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find_map(|child| c_cpp_declarator_ident(&child, source, spec))
 }
 
 fn collect_scope_parts(node: &Node, source: &str, parts: &mut Vec<String>) {
@@ -2094,8 +2171,46 @@ fn extract_c_cpp_node(
                     None,
                     parent_fqn.map(|s| s.to_string()),
                 );
-                let fqn = sym.qualified.fqn();
+                let func_sym = sym.clone();
+                let fqn = func_sym.qualified.fqn();
                 symbols.push(sym);
+
+                let (param_spec, declaration_spec, assignment_spec) =
+                    if matches!(detect_language(Path::new(file)), Lang::Cpp) {
+                        (&CPP_FLOW_SPEC, &CPP_FLOW_SPEC, &CPP_ASSIGNMENT_FLOW_SPEC)
+                    } else {
+                        (&C_FLOW_SPEC, &C_FLOW_SPEC, &C_ASSIGNMENT_FLOW_SPEC)
+                    };
+                if let Some(body) = node.child_by_field_name("body") {
+                    let param_names = c_cpp_param_names(&outer_decl, source, param_spec);
+                    if !param_names.is_empty() {
+                        collect_param_forward_edges(
+                            param_spec,
+                            file,
+                            source,
+                            &body,
+                            &param_names,
+                            &func_sym.qualified,
+                            edges,
+                        );
+                    }
+                    collect_intermediate_flow_edges(
+                        declaration_spec,
+                        file,
+                        source,
+                        &body,
+                        &func_sym.qualified,
+                        edges,
+                    );
+                    collect_intermediate_flow_edges(
+                        assignment_spec,
+                        file,
+                        source,
+                        &body,
+                        &func_sym.qualified,
+                        edges,
+                    );
+                }
 
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name.to_string());
@@ -4885,6 +5000,97 @@ void caller() {
             "expected callee 'ptr_method' (from ptr->ptr_method()); got: {:?}",
             callee_names
         );
+    }
+}
+#[cfg(test)]
+mod c_data_flow_tests {
+    use super::*;
+
+    fn data_flow_edges(src: &str) -> Vec<RawEdge> {
+        parse_file("test.c", src)
+            .edges
+            .into_iter()
+            .filter(|edge| matches!(edge.kind, EdgeKind::DataFlowsTo))
+            .collect()
+    }
+
+    fn assert_data_flow_to(edges: &[RawEdge], target: &str) {
+        assert_eq!(edges.len(), 1, "expected exactly one data-flow edge: {edges:?}");
+        assert_eq!(edges[0].kind, EdgeKind::DataFlowsTo);
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, target),
+            _ => panic!("expected unresolved {target} target"),
+        }
+    }
+
+    #[test]
+    fn forwards_parameter_to_call() {
+        let edges = data_flow_edges("void Outer(int value) { inner(value); }");
+        assert_data_flow_to(&edges, "inner");
+        assert_eq!(edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn literal_argument_has_no_data_flow() {
+        assert!(data_flow_edges("void Outer(void) { inner(42); }").is_empty());
+    }
+
+    #[test]
+    fn intermediate_initializer_flows_to_call() {
+        let edges = data_flow_edges("void Outer(void) { int x = foo(); bar(x); }");
+        assert_data_flow_to(&edges, "bar");
+    }
+
+    #[test]
+    fn intermediate_assignment_flows_to_call() {
+        let edges = data_flow_edges("void Outer(void) { int x; x = foo(); bar(x); }");
+        assert_data_flow_to(&edges, "bar");
+    }
+}
+
+#[cfg(test)]
+mod cpp_data_flow_tests {
+    use super::*;
+
+    fn data_flow_edges(src: &str) -> Vec<RawEdge> {
+        parse_file("test.cpp", src)
+            .edges
+            .into_iter()
+            .filter(|edge| matches!(edge.kind, EdgeKind::DataFlowsTo))
+            .collect()
+    }
+
+    fn assert_data_flow_to(edges: &[RawEdge], target: &str) {
+        assert_eq!(edges.len(), 1, "expected exactly one data-flow edge: {edges:?}");
+        assert_eq!(edges[0].kind, EdgeKind::DataFlowsTo);
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, target),
+            _ => panic!("expected unresolved {target} target"),
+        }
+    }
+
+    #[test]
+    fn forwards_parameter_to_call() {
+        let edges = data_flow_edges("void Outer(int value) { Inner(value); }");
+        assert_data_flow_to(&edges, "Inner");
+        assert_eq!(edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn literal_argument_has_no_data_flow() {
+        assert!(data_flow_edges("void Outer() { Inner(42); }").is_empty());
+    }
+
+    #[test]
+    fn intermediate_initializer_flows_to_call() {
+        let edges = data_flow_edges("void Outer() { int x = Foo(); Bar(x); }");
+        assert_data_flow_to(&edges, "Bar");
+    }
+
+    #[test]
+    fn intermediate_assignment_flows_to_call() {
+        let edges = data_flow_edges("void Outer() { int x; x = Foo(); Bar(x); }");
+        assert_data_flow_to(&edges, "Bar");
     }
 }
 
