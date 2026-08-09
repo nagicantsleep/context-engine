@@ -527,160 +527,86 @@ struct FlowSpec {
     /// How to reach the argument-list node from a call node.
     args: NodeRef,
     /// Wrapper kinds to descend through when looking for a bare identifier
-    /// argument (e.g. C# `argument`, PHP `argument` -> `variable_name`).
-    /// Empty means arguments are bare identifiers directly.
+    /// argument (e.g. C# and PHP `argument`).
     arg_unwrap_kinds: &'static [&'static str],
-    /// AST node kinds representing a local variable binding statement
-    /// (e.g. Rust `let_declaration`, Python `assignment`).
+    /// AST node kinds representing a local variable binding statement.
     binding_kinds: &'static [&'static str],
     /// Field name for the bound variable name on a binding node.
     lhs_field: &'static str,
-    /// Field name for the bound value on a binding node.
-    rhs_field: &'static str,
-    /// Wrapper kinds to descend through (via first named child) when the
-    /// `lhs_field` value is a single-element list wrapper rather than the
-    /// identifier directly (e.g. Go `short_var_declaration`'s `left` field
-    /// is an `expression_list` wrapping one `identifier`). Empty means the
-    /// field value is the identifier directly.
+    /// Field name for the bound value when the grammar names it.
+    rhs_field: Option<&'static str>,
+    /// Unnamed RHS child kind for grammars such as C#.
+    rhs_child_kind: Option<&'static str>,
+    /// Wrapper kinds to descend through for the bound variable.
     lhs_unwrap_kinds: &'static [&'static str],
-    /// Wrapper kinds to descend through (via first named child) when the
-    /// `rhs_field` value is a single-element list wrapper rather than the
-    /// call expression directly (e.g. Go `short_var_declaration`'s `right`
-    /// field is an `expression_list` wrapping one call). Empty means the
-    /// field value is the call expression directly.
+    /// Wrapper kinds to descend through for the bound value.
     rhs_unwrap_kinds: &'static [&'static str],
-    /// Wrapper statement kinds to unwrap before checking `binding_kinds`
-    /// (e.g. Python `expression_statement` wraps `assignment`).
+    /// Wrapper statement kinds to unwrap before checking `binding_kinds`.
     stmt_unwrap: &'static [&'static str],
-    /// AST node kind(s) considered a bare identifier node.
+    /// AST node kinds considered identifier nodes.
     param_ident_kinds: &'static [&'static str],
 }
 
 const RUST_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression",
-    callee: NodeRef::Field("function"),
-    args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["let_declaration"],
-    lhs_field: "pattern",
-    rhs_field: "value",
-    lhs_unwrap_kinds: &[],
-    rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[],
-    param_ident_kinds: &["identifier"],
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["let_declaration"], lhs_field: "pattern",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
 };
-
 const PYTHON_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call",
-    callee: NodeRef::Field("function"),
-    args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["assignment"],
-    lhs_field: "left",
-    rhs_field: "right",
-    lhs_unwrap_kinds: &[],
-    rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["expression_statement"],
-    param_ident_kinds: &["identifier"],
+    call_kind: "call", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["assignment"], lhs_field: "left",
+    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["identifier"],
 };
-
-/// Go wraps `short_var_declaration` operands in `expression_list`, so both
-/// sides need unwrapping to reach the identifier and the call.
 const GO_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression",
-    callee: NodeRef::Field("function"),
-    args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["short_var_declaration"],
-    lhs_field: "left",
-    rhs_field: "right",
-    lhs_unwrap_kinds: &["expression_list"],
-    rhs_unwrap_kinds: &["expression_list"],
-    stmt_unwrap: &[],
-    param_ident_kinds: &["identifier"],
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["short_var_declaration"], lhs_field: "left",
+    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &["expression_list"],
+    rhs_unwrap_kinds: &["expression_list"], stmt_unwrap: &[], param_ident_kinds: &["identifier"],
 };
-
-/// JavaScript's `variable_declarator` sits directly under `lexical_declaration`
-/// (`let`/`const`) or `variable_declaration` (`var`). One spec serves JS,
-/// TypeScript, Tsx and Svelte, since those extractors delegate to the JS one.
 const JS_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression",
-    callee: NodeRef::Field("function"),
-    args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["variable_declarator"],
-    lhs_field: "name",
-    rhs_field: "value",
-    lhs_unwrap_kinds: &[],
-    rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["lexical_declaration", "variable_declaration"],
-    param_ident_kinds: &["identifier"],
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["variable_declarator"], lhs_field: "name",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["lexical_declaration", "variable_declaration"], param_ident_kinds: &["identifier"],
 };
-
-/// Ruby's `call` node uses `method`/`arguments` fields (not `function`) and
-/// `assignment` sits directly under the enclosing statement, so no
-/// `stmt_unwrap` is needed.
 const RUBY_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call",
-    callee: NodeRef::Field("method"),
-    args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["assignment"],
-    lhs_field: "left",
-    rhs_field: "right",
-    lhs_unwrap_kinds: &[],
-    rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[],
-    param_ident_kinds: &["identifier"],
+    call_kind: "call", callee: NodeRef::Field("method"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["assignment"], lhs_field: "left",
+    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
 };
-
-/// Java's `method_invocation` uses field `name` for the callee (not
-/// `function`), unlike Rust/Go/JS.
 const JAVA_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "method_invocation",
-    callee: NodeRef::Field("name"),
-    args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["variable_declarator"],
-    lhs_field: "name",
-    rhs_field: "value",
-    lhs_unwrap_kinds: &[],
-    rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["local_variable_declaration"],
-    param_ident_kinds: &["identifier"],
+    call_kind: "method_invocation", callee: NodeRef::Field("name"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["variable_declarator"], lhs_field: "name",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_variable_declaration"], param_ident_kinds: &["identifier"],
 };
-
-/// Dart's `initialized_variable_definition` sits directly under
-/// `local_variable_declaration` (with `name`/`value` fields), and calls are
-/// `call_expression` with `function`/`arguments` fields like Rust and Go.
 const DART_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression",
-    callee: NodeRef::Field("function"),
-    args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["initialized_variable_definition"],
-    lhs_field: "name",
-    rhs_field: "value",
-    lhs_unwrap_kinds: &[],
-    rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["local_variable_declaration"],
-    param_ident_kinds: &["identifier"],
+    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["initialized_variable_definition"], lhs_field: "name",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_variable_declaration"], param_ident_kinds: &["identifier"],
 };
 const PASCAL_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "exprCall",
-    callee: NodeRef::Field("entity"),
-    args: NodeRef::Field("args"),
-    arg_unwrap_kinds: &[],
-    binding_kinds: &["assignment"],
-    lhs_field: "lhs",
-    rhs_field: "rhs",
-    lhs_unwrap_kinds: &[],
-    rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[],
-    param_ident_kinds: &["identifier"],
+    call_kind: "exprCall", callee: NodeRef::Field("entity"), args: NodeRef::Field("args"),
+    arg_unwrap_kinds: &[], binding_kinds: &["assignment"], lhs_field: "lhs",
+    rhs_field: Some("rhs"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
 };
-
-
+const CSHARP_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "invocation_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &["argument"], binding_kinds: &["variable_declarator"], lhs_field: "name",
+    rhs_field: None, rhs_child_kind: Some("invocation_expression"), lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_declaration_statement", "variable_declaration"], param_ident_kinds: &["identifier"],
+};
+const PHP_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "function_call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &["argument"], binding_kinds: &["assignment_expression"], lhs_field: "left",
+    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["variable_name"],
+};
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
 fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
@@ -698,22 +624,18 @@ fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
     None
 }
 
-/// Resolve a statement to the binding node it represents, unwrapping
-/// `stmt_unwrap` wrapper kinds first (e.g. Python's `expression_statement`)
-/// by scanning named children for the first one matching `binding_kinds`
-/// (e.g. skips Java's `type` field child to find `variable_declarator`).
+/// Resolve a statement to its binding node, recursively unwrapping the
+/// language-specific statement wrappers around it.
 fn resolve_binding<'a>(stmt: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
-    if spec.stmt_unwrap.contains(&stmt.kind()) {
-        let mut cursor = stmt.walk();
-        return stmt
-            .named_children(&mut cursor)
-            .find(|c| spec.binding_kinds.contains(&c.kind()));
-    }
     if spec.binding_kinds.contains(&stmt.kind()) {
-        Some(stmt)
-    } else {
-        None
+        return Some(stmt);
     }
+    if !spec.stmt_unwrap.contains(&stmt.kind()) {
+        return None;
+    }
+    let mut cursor = stmt.walk();
+    stmt.named_children(&mut cursor)
+        .find_map(|child| resolve_binding(child, spec))
 }
 
 /// Descend through a single list-wrapper node (e.g. Go `expression_list`) to
@@ -725,6 +647,21 @@ fn unwrap_operand<'a>(node: Node<'a>, unwrap_kinds: &[&str]) -> Option<Node<'a>>
     } else {
         Some(node)
     }
+}
+
+/// Resolve a binding's RHS, including C#'s unnamed initializer child.
+fn resolve_rhs<'a>(binding: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
+    if let Some(field) = spec.rhs_field {
+        return binding
+            .child_by_field_name(field)
+            .and_then(|v| unwrap_operand(v, spec.rhs_unwrap_kinds));
+    }
+    spec.rhs_child_kind.and_then(|kind| {
+        let mut cursor = binding.walk();
+        binding
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == kind)
+    })
 }
 
 fn collect_param_forward_edges<'a>(
@@ -829,19 +766,14 @@ fn collect_intermediate_flow_edges<'a>(
                 .and_then(|p| unwrap_operand(p, spec.lhs_unwrap_kinds))
                 .filter(|p| spec.param_ident_kinds.contains(&p.kind()))
                 .map(|p| node_text(&p, source).to_string());
-            let rhs_callee = asgn
-                .child_by_field_name(spec.rhs_field)
-                .and_then(|v| unwrap_operand(v, spec.rhs_unwrap_kinds))
+            let rhs_callee = resolve_rhs(asgn, spec)
                 .filter(|v| v.kind() == spec.call_kind)
                 .and_then(|v| spec.callee.resolve(&v))
                 .map(|f| node_text(&f, source).to_string());
 
             if let (Some(var), Some(callee)) = (var_name, rhs_callee) {
                 let mut chain_depth = 1usize;
-                if let Some(rhs_node) = asgn
-                    .child_by_field_name(spec.rhs_field)
-                    .and_then(|v| unwrap_operand(v, spec.rhs_unwrap_kinds))
-                {
+                if let Some(rhs_node) = resolve_rhs(asgn, spec) {
                     if let Some(args_node) = spec.args.resolve(&rhs_node) {
                         let mut acursor = args_node.walk();
                         for arg in args_node.children(&mut acursor) {
@@ -2393,7 +2325,30 @@ fn extract_csharp_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params_node) = node.child_by_field_name("parameters") {
+                    let mut pcursor = params_node.walk();
+                    for param in params_node.named_children(&mut pcursor) {
+                        if let Some(name_node) = param.child_by_field_name("name") {
+                            if CSHARP_FLOW_SPEC.param_ident_kinds.contains(&name_node.kind()) {
+                                param_names.insert(node_text(&name_node, source));
+                            }
+                        }
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    if !param_names.is_empty() {
+                        collect_param_forward_edges(
+                            &CSHARP_FLOW_SPEC, file, source, &body_node, &param_names, &func_sym,
+                            edges,
+                        );
+                    }
+                    collect_intermediate_flow_edges(
+                        &CSHARP_FLOW_SPEC, file, source, &body_node, &func_sym, edges,
+                    );
+                }
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor = node.walk();
@@ -2639,7 +2594,32 @@ fn extract_php_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params_node) = node.child_by_field_name("parameters") {
+                    let mut pcursor = params_node.walk();
+                    for param in params_node.named_children(&mut pcursor) {
+                        let mut name_cursor = param.walk();
+                        if let Some(name_node) = param
+                            .named_children(&mut name_cursor)
+                            .find(|child| PHP_FLOW_SPEC.param_ident_kinds.contains(&child.kind()))
+                        {
+                            param_names.insert(node_text(&name_node, source));
+                        }
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    if !param_names.is_empty() {
+                        collect_param_forward_edges(
+                            &PHP_FLOW_SPEC, file, source, &body_node, &param_names, &func_sym,
+                            edges,
+                        );
+                    }
+                    collect_intermediate_flow_edges(
+                        &PHP_FLOW_SPEC, file, source, &body_node, &func_sym, edges,
+                    );
+                }
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor = node.walk();
@@ -5091,6 +5071,82 @@ class Foo {
 }
 
 #[cfg(test)]
+mod csharp_data_flow_tests {
+    use super::*;
+
+    fn data_flow_edges(src: &str) -> Vec<RawEdge> {
+        parse_file("flow.cs", src)
+            .edges
+            .into_iter()
+            .filter(|edge| matches!(edge.kind, EdgeKind::DataFlowsTo))
+            .collect()
+    }
+
+    #[test]
+    fn forwards_parameter_to_call() {
+        let edges = data_flow_edges("class C { void Outer(string x) { Inner(x); } }");
+        assert_eq!(edges.len(), 1);
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "Inner"),
+            _ => panic!("expected unresolved Inner target"),
+        }
+        assert_eq!(edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn literal_argument_has_no_data_flow() {
+        assert!(data_flow_edges("class C { void Outer() { Inner(42); } }").is_empty());
+    }
+
+    #[test]
+    fn intermediate_initializer_flows_to_call() {
+        let edges = data_flow_edges("class C { void Outer() { string x = Foo(); Bar(x); } }");
+        assert!(edges.iter().any(|edge| matches!(
+            &edge.to,
+            EdgeTarget::Unresolved { name, .. } if name == "Bar"
+        )));
+    }
+}
+
+#[cfg(test)]
+mod php_data_flow_tests {
+    use super::*;
+
+    fn data_flow_edges(src: &str) -> Vec<RawEdge> {
+        parse_file("flow.php", src)
+            .edges
+            .into_iter()
+            .filter(|edge| matches!(edge.kind, EdgeKind::DataFlowsTo))
+            .collect()
+    }
+
+    #[test]
+    fn forwards_parameter_to_call() {
+        let edges = data_flow_edges("<?php function outer($x) { inner($x); }");
+        assert_eq!(edges.len(), 1);
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("expected unresolved inner target"),
+        }
+        assert_eq!(edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn literal_argument_has_no_data_flow() {
+        assert!(data_flow_edges("<?php function outer() { inner(42); }").is_empty());
+    }
+
+    #[test]
+    fn intermediate_assignment_flows_to_call() {
+        let edges = data_flow_edges("<?php function outer() { $x = foo(); bar($x); }");
+        assert!(edges.iter().any(|edge| matches!(
+            &edge.to,
+            EdgeTarget::Unresolved { name, .. } if name == "bar"
+        )));
+    }
+}
+
+#[cfg(test)]
 mod ruby_tests {
     use super::*;
 
@@ -5108,6 +5164,7 @@ end
         let result = parse_file("test.rb", src);
         let mod_sym = result.symbols.iter().find(|s| s.qualified.name == "Utils");
         assert!(mod_sym.is_some(), "expected module Utils");
+
         assert_eq!(mod_sym.unwrap().kind, SymbolKind::Module);
 
         let cls = result.symbols.iter().find(|s| s.qualified.name == "Parser");
