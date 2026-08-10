@@ -502,12 +502,9 @@ enum NodeRef {
     /// Reachable via `child_by_field_name`.
     Field(&'static str),
     /// Reachable via positional `child(index)` (no field name in the grammar).
-    ///
-    /// Unused until Swift/Kotlin land — their grammars expose the callee
-    /// positionally (child index 0, no field name) rather than via a named
-    /// field.
-    #[allow(dead_code)]
     Child(usize),
+    /// Reachable by walking named descendants until the requested kind.
+    ChildOfKind(&'static str),
 }
 
 impl NodeRef {
@@ -515,6 +512,14 @@ impl NodeRef {
         match self {
             NodeRef::Field(name) => node.child_by_field_name(*name),
             NodeRef::Child(idx) => node.child(*idx),
+            NodeRef::ChildOfKind(kind) => {
+                if node.kind() == *kind {
+                    return Some(*node);
+                }
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find_map(|child| self.resolve(&child))
+            }
         }
     }
 }
@@ -644,6 +649,18 @@ const LUAU_FLOW_SPEC: FlowSpec = FlowSpec {
     rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &["variable_list"],
     rhs_unwrap_kinds: &["expression_list"], stmt_unwrap: &["variable_declaration"],
     param_ident_kinds: &["identifier"],
+};
+const SWIFT_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression", callee: NodeRef::Child(0), args: NodeRef::ChildOfKind("value_arguments"),
+    arg_unwrap_kinds: &["value_argument"], binding_kinds: &["property_declaration"], lhs_field: "name",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &["pattern"], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[], param_ident_kinds: &["simple_identifier"],
+};
+const SWIFT_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression", callee: NodeRef::Child(0), args: NodeRef::ChildOfKind("value_arguments"),
+    arg_unwrap_kinds: &["value_argument"], binding_kinds: &["assignment"], lhs_field: "target",
+    rhs_field: Some("result"), rhs_child_kind: None, lhs_unwrap_kinds: &["directly_assignable_expression"],
+    rhs_unwrap_kinds: &[], stmt_unwrap: &[], param_ident_kinds: &["simple_identifier"],
 };
 
 fn luau_parameter_ident<'a>(parameter: Node<'a>) -> Option<Node<'a>> {
@@ -3440,14 +3457,95 @@ fn extract_swift_node(
         None => return,
     };
     match node.kind() {
-        "function_declaration" | "init_declaration" => {
-            // Name is a positional simple_identifier child
+        "function_declaration" => {
+            // Name is a positional simple_identifier child.
             let mut cursor = node.walk();
             let name = node
                 .children(&mut cursor)
                 .find(|c| c.kind() == "simple_identifier")
                 .map(|c| node_text(&c, source).to_string())
-                .unwrap_or_else(|| "init".to_string());
+                .unwrap_or_else(|| "<anonymous>".to_string());
+            let kind = if !scope.is_empty() {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            };
+            let sym = make_symbol(
+                file,
+                &name,
+                scope.to_vec(),
+                kind,
+                node_line_start(node),
+                node_line_end(node),
+                None,
+                parent_fqn.map(|s| s.to_string()),
+            );
+            let fqn = sym.qualified.fqn();
+            let func_sym = sym.qualified.clone();
+            symbols.push(sym);
+
+            let mut param_names: HashSet<&str> = HashSet::new();
+            let mut pcursor = node.walk();
+            for param in node.children(&mut pcursor) {
+                if param.kind() == "parameter" {
+                    let mut param_cursor = param.walk();
+                    for child in param.named_children(&mut param_cursor) {
+                        if SWIFT_FLOW_SPEC.param_ident_kinds.contains(&child.kind()) {
+                            param_names.insert(node_text(&child, source));
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(body_node) = node.child_by_field_name("body") {
+                if let Some(statements) = NodeRef::ChildOfKind("statements").resolve(&body_node) {
+                    if !param_names.is_empty() {
+                        collect_param_forward_edges(
+                            &SWIFT_FLOW_SPEC,
+                            file,
+                            source,
+                            &statements,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                    collect_intermediate_flow_edges(
+                        &SWIFT_FLOW_SPEC,
+                        file,
+                        source,
+                        &statements,
+                        &func_sym,
+                        edges,
+                    );
+                    collect_intermediate_flow_edges(
+                        &SWIFT_ASSIGNMENT_FLOW_SPEC,
+                        file,
+                        source,
+                        &statements,
+                        &func_sym,
+                        edges,
+                    );
+                }
+            }
+
+            let mut child_scope = scope.to_vec();
+            child_scope.push(name);
+            let mut cursor2 = node.walk();
+            for child in node.children(&mut cursor2) {
+                extract_swift_node(
+                    file,
+                    source,
+                    &child,
+                    &child_scope,
+                    Some(&fqn),
+                    symbols,
+                    edges,
+                );
+            }
+        }
+        "init_declaration" => {
+            let name = "init".to_string();
             let kind = if !scope.is_empty() {
                 SymbolKind::Method
             } else {
@@ -5612,6 +5710,83 @@ protocol Drawable {
                 .collect::<Vec<_>>()
         );
         assert_eq!(proto.unwrap().kind, SymbolKind::Interface);
+    }
+}
+#[cfg(test)]
+mod swift_data_flow_tests {
+    use super::*;
+
+    fn data_flow_edges(source: &str) -> Vec<RawEdge> {
+        parse_file("test.swift", source)
+            .edges
+            .into_iter()
+            .filter(|edge| matches!(edge.kind, EdgeKind::DataFlowsTo))
+            .collect()
+    }
+
+    #[test]
+    fn forwards_parameter_to_called_function() {
+        let edges = data_flow_edges(
+            r#"
+func g(x: Int) {
+    f(x)
+}
+"#,
+        );
+        assert_eq!(edges.len(), 1);
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "f"),
+            _ => panic!("expected unresolved f target"),
+        }
+        assert_eq!(edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_argument() {
+        let edges = data_flow_edges(
+            r#"
+func g(x: Int) {
+    f(42)
+}
+"#,
+        );
+        assert!(edges.is_empty(), "literal argument emitted DataFlowsTo: {edges:?}");
+    }
+
+    #[test]
+    fn intermediate_variable_flow_property_declaration() {
+        let edges = data_flow_edges(
+            r#"
+func g() {
+    let x = foo()
+    bar(x)
+}
+"#,
+        );
+        assert_eq!(edges.len(), 1);
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "bar"),
+            _ => panic!("expected unresolved bar target"),
+        }
+        assert_eq!(edges[0].confidence, Confidence::Inferred(0.6));
+    }
+
+    #[test]
+    fn intermediate_variable_flow_assignment() {
+        let edges = data_flow_edges(
+            r#"
+func g() {
+    x = foo()
+    bar(x)
+}
+"#,
+        );
+        assert_eq!(edges.len(), 1);
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "bar"),
+            _ => panic!("expected unresolved bar target"),
+        }
+        assert_eq!(edges[0].confidence, Confidence::Inferred(0.6));
     }
 }
 
