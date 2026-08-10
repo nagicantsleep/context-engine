@@ -505,8 +505,9 @@ enum NodeRef {
     Child(usize),
     /// Reachable by walking named descendants until the requested kind.
     ChildOfKind(&'static str),
+    /// Reach the first direct named child of a kind, with a verified positional fallback.
+    NamedChildOfKindOrChild(&'static str, usize),
 }
-
 impl NodeRef {
     fn resolve<'a>(&self, node: &Node<'a>) -> Option<Node<'a>> {
         match self {
@@ -519,6 +520,12 @@ impl NodeRef {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor)
                     .find_map(|child| self.resolve(&child))
+            }
+            NodeRef::NamedChildOfKindOrChild(kind, idx) => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|child| child.kind() == *kind)
+                    .or_else(|| node.child(*idx))
             }
         }
     }
@@ -662,7 +669,12 @@ const SWIFT_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
     rhs_field: Some("result"), rhs_child_kind: None, lhs_unwrap_kinds: &["directly_assignable_expression"],
     rhs_unwrap_kinds: &[], stmt_unwrap: &[], param_ident_kinds: &["simple_identifier"],
 };
-
+const KOTLIN_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "call_expression", callee: NodeRef::NamedChildOfKindOrChild("expression", 0), args: NodeRef::ChildOfKind("value_arguments"),
+    arg_unwrap_kinds: &["value_argument"], binding_kinds: &[], lhs_field: "",
+    rhs_field: None, rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
+};
 fn luau_parameter_ident<'a>(parameter: Node<'a>) -> Option<Node<'a>> {
     if parameter.kind() != "parameter" {
         return None;
@@ -681,6 +693,12 @@ fn resolve_ident_arg<'a>(node: Node<'a>, spec: &FlowSpec) -> Option<Node<'a>> {
     }
     if spec.arg_unwrap_kinds.contains(&node.kind()) {
         let mut cursor = node.walk();
+        if node.kind() == "value_argument" {
+            let children: Vec<_> = node.named_children(&mut cursor).collect();
+            return children
+                .last()
+                .and_then(|child| resolve_ident_arg(*child, spec));
+        }
         for child in node.children(&mut cursor) {
             if let Some(found) = resolve_ident_arg(child, spec) {
                 return Some(found);
@@ -871,6 +889,90 @@ fn collect_intermediate_flow_edges<'a>(
             }
         } else {
             scan_calls(spec, source, &stmt, &var_map, from_sym, edges);
+        }
+    }
+}
+fn kotlin_binding_parts<'a>(stmt: Node<'a>, source: &str) -> Option<(String, Node<'a>)> {
+    match stmt.kind() {
+        "property_declaration" => {
+            let mut cursor = stmt.walk();
+            let variable = stmt
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "variable_declaration")?;
+            let mut variable_cursor = variable.walk();
+            let lhs = variable
+                .named_children(&mut variable_cursor)
+                .find(|child| child.kind() == "identifier")?;
+            let mut stmt_cursor = stmt.walk();
+            let rhs = stmt
+                .named_children(&mut stmt_cursor)
+                .find(|child| child.kind() == KOTLIN_FLOW_SPEC.call_kind)?;
+            Some((node_text(&lhs, source).to_string(), rhs))
+        }
+        "assignment" => {
+            let lhs = stmt
+                .child_by_field_name("left")
+                .filter(|child| child.kind() == "identifier")?;
+            let rhs = stmt
+                .child_by_field_name("right")
+                .filter(|child| child.kind() == KOTLIN_FLOW_SPEC.call_kind)?;
+            Some((node_text(&lhs, source).to_string(), rhs))
+        }
+        _ => None,
+    }
+}
+
+fn collect_kotlin_intermediate_flow_edges<'a>(
+    source: &str,
+    node: &Node<'a>,
+    from_sym: &QualifiedSymbol,
+    edges: &mut Vec<RawEdge>,
+) {
+    let mut var_map: HashMap<String, (String, usize)> = HashMap::new();
+    let mut cursor = node.walk();
+    for stmt in node.children(&mut cursor) {
+        if let Some((var_name, rhs_node)) = kotlin_binding_parts(stmt, source) {
+            let callee = KOTLIN_FLOW_SPEC
+                .callee
+                .resolve(&rhs_node)
+                .map(|callee| node_text(&callee, source).to_string());
+            if let Some(callee) = callee {
+                let mut chain_depth = 1usize;
+                if let Some(args_node) = KOTLIN_FLOW_SPEC.args.resolve(&rhs_node) {
+                    let mut args_cursor = args_node.walk();
+                    for arg in args_node.children(&mut args_cursor) {
+                        if let Some(id) = resolve_ident_arg(arg, &KOTLIN_FLOW_SPEC)
+                            && let Some((_src_callee, depth)) = var_map.get(node_text(&id, source))
+                        {
+                            edges.push(RawEdge {
+                                from: from_sym.clone(),
+                                to: EdgeTarget::Unresolved {
+                                    name: callee.clone(),
+                                    import_path: None,
+                                    qualifier: None,
+                                },
+                                kind: EdgeKind::DataFlowsTo,
+                                line: node_line_start(&rhs_node),
+                                confidence: Confidence::Inferred(0.6),
+                            });
+                            chain_depth = depth + 1;
+                            break;
+                        }
+                    }
+                }
+                if chain_depth <= 3 {
+                    var_map.insert(var_name, (callee, chain_depth));
+                }
+            }
+        } else {
+            scan_calls(
+                &KOTLIN_FLOW_SPEC,
+                source,
+                &stmt,
+                &var_map,
+                from_sym,
+                edges,
+            );
         }
     }
 }
@@ -3724,12 +3826,9 @@ fn extract_kotlin_node(
     };
     match node.kind() {
         "function_declaration" => {
-            // Name is a positional identifier child
-            let mut cursor = node.walk();
             let name = node
-                .children(&mut cursor)
-                .find(|c| c.kind() == "identifier")
-                .map(|c| node_text(&c, source).to_string());
+                .child_by_field_name("name")
+                .map(|name_node| node_text(&name_node, source).to_string());
             if let Some(name) = name {
                 let kind = if !scope.is_empty() {
                     SymbolKind::Method
@@ -3747,7 +3846,41 @@ fn extract_kotlin_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params) = NodeRef::ChildOfKind("function_value_parameters").resolve(node) {
+                    let mut params_cursor = params.walk();
+                    for parameter in params.named_children(&mut params_cursor) {
+                        if parameter.kind() == "parameter" {
+                            let mut parameter_cursor = parameter.walk();
+                            if let Some(identifier) = parameter
+                                .named_children(&mut parameter_cursor)
+                                .find(|child| KOTLIN_FLOW_SPEC.param_ident_kinds.contains(&child.kind()))
+                            {
+                                param_names.insert(node_text(&identifier, source));
+                            }
+                        }
+                    }
+                }
+                if let Some(function_body) = NodeRef::ChildOfKind("function_body").resolve(node)
+                    && let Some(block) = NodeRef::ChildOfKind("block").resolve(&function_body)
+                {
+                    if !param_names.is_empty() {
+                        collect_param_forward_edges(
+                            &KOTLIN_FLOW_SPEC,
+                            file,
+                            source,
+                            &block,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                    collect_kotlin_intermediate_flow_edges(source, &block, &func_sym, edges);
+                }
+
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor2 = node.walk();
@@ -3853,12 +3986,12 @@ fn extract_kotlin_node(
             }
         }
         "call_expression" => {
-            // First non-call_suffix child is the callee
-            let mut cursor = node.walk();
-            let callee = node
-                .children(&mut cursor)
-                .find(|c| c.kind() != "call_suffix")
-                .map(|c| node_text(&c, source).to_string());
+            // Kotlin-ng call_expression has a positional callee child followed by
+            // optional type_arguments and value_arguments children.
+            let callee = KOTLIN_FLOW_SPEC
+                .callee
+                .resolve(node)
+                .map(|callee| node_text(&callee, source).to_string());
             if let Some(callee_name) = callee
                 && let Some(from_sym) = scope_to_qualified(file, scope)
             {
@@ -5533,6 +5666,67 @@ mod php_data_flow_tests {
             &edge.to,
             EdgeTarget::Unresolved { name, .. } if name == "bar"
         )));
+    }
+}
+
+#[cfg(test)]
+mod kotlin_data_flow_tests {
+    use super::*;
+
+    fn data_flow_edges(src: &str) -> Vec<RawEdge> {
+        parse_file("flow.kt", src)
+            .edges
+            .into_iter()
+            .filter(|edge| matches!(edge.kind, EdgeKind::DataFlowsTo))
+            .collect()
+    }
+
+    fn assert_data_flow_to(edges: &[RawEdge], target: &str, confidence: Confidence) {
+        assert_eq!(edges.len(), 1, "expected exactly one data-flow edge: {edges:?}");
+        match &edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, target),
+            _ => panic!("expected unresolved {target} target"),
+        }
+        assert_eq!(edges[0].confidence, confidence);
+    }
+
+    #[test]
+    fn forwards_parameter_to_call() {
+        let edges = data_flow_edges("fun outer(input: String) { inner(input) }");
+        assert_data_flow_to(&edges, "inner", Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn literal_argument_has_no_data_flow() {
+        assert!(data_flow_edges("fun outer() { inner(42) }").is_empty());
+    }
+
+    #[test]
+    fn named_literal_argument_has_no_data_flow_when_label_matches_parameter() {
+        assert!(data_flow_edges("fun outer(value: String) { inner(value = 42) }").is_empty());
+    }
+
+    #[test]
+    fn intermediate_initializer_flows_to_call() {
+        let edges = data_flow_edges("fun outer() { val x = foo(); bar(x) }");
+        assert_data_flow_to(&edges, "bar", Confidence::Inferred(0.6));
+    }
+
+    #[test]
+    fn intermediate_assignment_flows_to_call() {
+        let edges = data_flow_edges("fun outer() { var x = seed(); x = foo(); bar(x) }");
+        assert_data_flow_to(&edges, "bar", Confidence::Inferred(0.6));
+    }
+    #[test]
+    fn forwards_named_parameter_to_call() {
+        let edges = data_flow_edges("fun outer(input: String) { inner(value = input) }");
+        assert_data_flow_to(&edges, "inner", Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn named_intermediate_initializer_flows_to_call() {
+        let edges = data_flow_edges("fun outer() { val x = foo(); bar(value = x) }");
+        assert_data_flow_to(&edges, "bar", Confidence::Inferred(0.6));
     }
 }
 
