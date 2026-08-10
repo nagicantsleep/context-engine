@@ -631,6 +631,13 @@ const CPP_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
     rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
     stmt_unwrap: &["expression_statement"], param_ident_kinds: &["identifier", "field_identifier"],
 };
+const LUA_FLOW_SPEC: FlowSpec = FlowSpec {
+    call_kind: "function_call", callee: NodeRef::Field("name"), args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[], binding_kinds: &["assignment_statement"], lhs_field: "name",
+    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &["variable_list"],
+    rhs_unwrap_kinds: &["expression_list"], stmt_unwrap: &["variable_declaration"],
+    param_ident_kinds: &["identifier"],
+};
 
 /// Resolve a call argument node to the identifier it refers to, descending
 /// through any language-specific wrapper kinds (`arg_unwrap_kinds`).
@@ -4162,7 +4169,38 @@ fn extract_lua_node(
                     parent_fqn.map(|s| s.to_string()),
                 );
                 let fqn = sym.qualified.fqn();
+                let func_sym = sym.qualified.clone();
                 symbols.push(sym);
+                let mut param_names: HashSet<&str> = HashSet::new();
+                if let Some(params_node) = node.child_by_field_name("parameters") {
+                    let mut pcursor = params_node.walk();
+                    for param in params_node.children_by_field_name("name", &mut pcursor) {
+                        if LUA_FLOW_SPEC.param_ident_kinds.contains(&param.kind()) {
+                            param_names.insert(node_text(&param, source));
+                        }
+                    }
+                }
+                if let Some(body_node) = node.child_by_field_name("body") {
+                    if !param_names.is_empty() {
+                        collect_param_forward_edges(
+                            &LUA_FLOW_SPEC,
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
+                            edges,
+                        );
+                    }
+                    collect_intermediate_flow_edges(
+                        &LUA_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
+                    );
+                }
                 let mut child_scope = scope.to_vec();
                 child_scope.push(name);
                 let mut cursor = node.walk();
@@ -5647,6 +5685,97 @@ end
         assert_eq!(method.unwrap().kind, SymbolKind::Method);
     }
 }
+
+#[cfg(test)]
+mod lua_data_flow_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_param_to_called_function() {
+        let src = r#"
+function g(x)
+    f(x)
+end
+"#;
+        let result = parse_file("test.lua", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "f"),
+            _ => panic!("expected Unresolved target"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.75));
+    }
+
+    #[test]
+    fn no_edge_for_literal_argument() {
+        let src = r#"
+function g(x)
+    f(42)
+end
+"#;
+        let result = parse_file("test.lua", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert!(
+            df_edges.is_empty(),
+            "literal argument must not produce a DataFlowsTo edge; got {:?}",
+            df_edges
+        );
+    }
+
+    #[test]
+    fn intermediate_variable_flow_local_declaration() {
+        let src = r#"
+function g()
+    local x = foo()
+    bar(x)
+end
+"#;
+        let result = parse_file("test.lua", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "bar"),
+            _ => panic!("expected Unresolved target"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.6));
+    }
+
+    #[test]
+    fn intermediate_variable_flow_plain_assignment() {
+        let src = r#"
+function g()
+    x = foo()
+    bar(x)
+end
+"#;
+        let result = parse_file("test.lua", src);
+        let df_edges: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::DataFlowsTo))
+            .collect();
+        assert_eq!(df_edges.len(), 1);
+        match &df_edges[0].to {
+            EdgeTarget::Unresolved { name, .. } => assert_eq!(name, "bar"),
+            _ => panic!("expected Unresolved target"),
+        }
+        assert_eq!(df_edges[0].confidence, Confidence::Inferred(0.6));
+    }
+}
+
 
 #[cfg(test)]
 mod luau_tests {
