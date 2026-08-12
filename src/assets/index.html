@@ -40,19 +40,23 @@
             },
             // ADE light tokens mapped onto the gray scale the UI utilities use,
             // so `bg-white dark:bg-wiki-surface` pairs stay consistent in both
-            // themes. Note: gray-900 is the raised token used only for the toast
-            // overlay, which is deliberately a dark chip in BOTH themes.
+            // themes. Mapping follows each key's ACTUAL role in this markup
+            // (audited per-property), not its Tailwind step:
+            //   50  page/input bg · 100 raised (hover/chips/skeletons)
+            //   200+300 borders/dividers · 400..600 muted text
+            //   700..900 primary text. The toast chip is `bg-wiki-surface`
+            //   (a dark chip in BOTH themes), not gray-900.
             gray: {
               50: '#f7f8fa',
-              100: '#ffffff',
-              200: '#f1f2f5',
+              100: '#f1f2f5',
+              200: '#d8dbe1',
               300: '#d8dbe1',
               400: '#5c616b',
               500: '#5c616b',
               600: '#5c616b',
               700: '#15171c',
               800: '#15171c',
-              900: '#1f232a',
+              900: '#15171c',
             },
           }
         }
@@ -324,9 +328,10 @@
     </div>
   </div>
 
-  <!-- "Saved" toast — deliberately a dark overlay chip in BOTH themes (text stays
-       white); gray-900 maps to the ADE raised token, not a theme surface. -->
-  <div id="toast-saved" data-i18n="toast.saved" class="hidden fixed bottom-6 right-6 bg-gray-900 dark:bg-gray-900 dark:border dark:border-wiki-border-active text-white dark:text-white text-sm px-4 py-2 rounded shadow-lg
+  <!-- "Saved" toast — deliberately a dark overlay chip in BOTH themes: it uses
+       the dark surface token directly (bg-wiki-surface applies in light too),
+       never a gray-scale utility that flips with the theme. -->
+  <div id="toast-saved" data-i18n="toast.saved" class="hidden fixed bottom-6 right-6 bg-wiki-surface dark:border dark:border-wiki-border-active text-white text-sm px-4 py-2 rounded shadow-lg
        transition-opacity duration-300 opacity-0">
     Saved
   </div>
