@@ -18,27 +18,159 @@
       darkMode: 'class',
       theme: {
         extend: {
+          // Spec ADE embed bridge v1.0 — the SINGLE source of ADE hex + font values.
+          // `wiki.*` slots are the dark theme; the light-half gray-* overrides
+          // below carry the matching ADE light values. Edit values only here.
+          fontFamily: {
+            sans: ['"IBM Plex Sans"', 'system-ui', '-apple-system', '"Segoe UI"', 'sans-serif'],
+            mono: ['Lilex', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+          },
           colors: {
             wiki: {
-              bg: '#101418',
-              surface: '#1b2024',
-              border: '#2e3a42',
+              bg: '#0c0d10',
+              surface: '#15171c',
+              raised: '#1f232a',
+              border: '#262b33',
               'border-active': '#5a9ecf',
-              text: '#c8ccd1',
-              'text-muted': '#8899a6',
-              heading: '#e3e8ed',
+              text: '#e6e8ec',
+              'text-muted': '#9aa0a9',
+              heading: '#e6e8ec',
               link: '#6b9fce',
               'link-hover': '#8bb8e0',
-            }
+            },
+            // ADE light tokens mapped onto the gray scale the UI utilities use,
+            // so `bg-white dark:bg-wiki-surface` pairs stay consistent in both
+            // themes. Note: gray-900 is the raised token used only for the toast
+            // overlay, which is deliberately a dark chip in BOTH themes.
+            gray: {
+              50: '#f7f8fa',
+              100: '#ffffff',
+              200: '#f1f2f5',
+              300: '#d8dbe1',
+              400: '#5c616b',
+              500: '#5c616b',
+              600: '#5c616b',
+              700: '#15171c',
+              800: '#15171c',
+              900: '#1f232a',
+            },
           }
         }
       }
     };
-    if (localStorage.getItem('theme') === 'light') {
-      document.documentElement.classList.remove('dark');
-    }
+    // Boot theme before first paint. Order: ?ade-theme= query (Spec ADE embed),
+    // then the user's saved choice; otherwise stay dark (the <html> default).
+    (function bootAdeTheme() {
+      const param = new URLSearchParams(location.search).get('ade-theme');
+      const theme = param === 'light' || param === 'dark' ? param : localStorage.getItem('theme');
+      if (theme === 'light') document.documentElement.classList.remove('dark');
+      else if (theme === 'dark') document.documentElement.classList.add('dark');
+    })();
   </script>
   <style>
+    /* Spec ADE self-hosted faces (see assets/fonts/ + assets/mod.rs).
+       unicode-range splits keep the first paint small: latin loads first,
+       vietnamese only when a glyph in that range is needed. */
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-latin-400.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-vietnamese-400.woff2') format('woff2');
+      unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: italic;
+      font-weight: 400;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-latin-400-italic.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 500;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-latin-500.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 500;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-vietnamese-500.woff2') format('woff2');
+      unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 600;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-latin-600.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 600;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-vietnamese-600.woff2') format('woff2');
+      unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-latin-700.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'IBM Plex Sans';
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url('/assets/fonts/IBMPlexSans-vietnamese-700.woff2') format('woff2');
+      unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+    }
+    @font-face {
+      font-family: 'Lilex';
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url('/assets/fonts/Lilex-latin-400.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Lilex';
+      font-style: normal;
+      font-weight: 500;
+      font-display: swap;
+      src: url('/assets/fonts/Lilex-latin-500.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Lilex';
+      font-style: normal;
+      font-weight: 600;
+      font-display: swap;
+      src: url('/assets/fonts/Lilex-latin-600.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Lilex';
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url('/assets/fonts/Lilex-latin-700.woff2') format('woff2');
+    }
     /* 'Noto Serif' leads because it ships precomposed Vietnamese glyphs; the rest are
        offline fallbacks. font-synthesis:none stops the browser from faking a missing
        glyph by stacking a base letter + a combining mark (the detached-tone-mark bug). */
@@ -78,7 +210,7 @@
     .chat-md a { color: #2563eb; }
     .dark .chat-md a { color: #6b9fce; }
     .chat-md code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: 'Lilex', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.88em; padding: 0.1em 0.35em; border-radius: 3px;
       background: rgba(0, 0, 0, 0.06);
     }
@@ -89,7 +221,7 @@
       border: 1px solid rgba(0, 0, 0, 0.08);
     }
     .dark .chat-md pre {
-      background: #101418; border-color: #2e3a42;
+      background: #0c0d10; border-color: #262b33;
     }
     .chat-md pre code { background: none; padding: 0; font-size: 0.85em; }
     /* GitHub-style tables — thin borders, tinted header, Wikipedia data-viz feel. */
@@ -102,19 +234,19 @@
       max-width: 100%;
     }
     .chat-md th, .chat-md td {
-      border: 1px solid #d1d5db;
+      border: 1px solid #d8dbe1;
       padding: 0.3em 0.6em;
       text-align: left;
       vertical-align: top;
     }
-    .dark .chat-md th, .dark .chat-md td { border-color: #2e3a42; }
+    .dark .chat-md th, .dark .chat-md td { border-color: #262b33; }
     .chat-md th { background: rgba(0, 0, 0, 0.04); font-weight: 600; }
     .dark .chat-md th { background: rgba(255, 255, 255, 0.05); }
     .chat-md tr:nth-child(even) td { background: rgba(0, 0, 0, 0.02); }
     .dark .chat-md tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
   </style>
 </head>
-<body class="bg-gray-50 dark:bg-wiki-bg text-gray-900 dark:text-wiki-text min-h-screen transition-colors duration-200">
+<body class="bg-gray-50 dark:bg-wiki-bg text-gray-900 dark:text-wiki-text font-sans min-h-screen transition-colors duration-200">
 
 <div class="max-w-3xl mx-auto px-6 py-8">
   <!-- Header -->
@@ -192,8 +324,9 @@
     </div>
   </div>
 
-  <!-- "Saved" toast -->
-  <div id="toast-saved" data-i18n="toast.saved" class="hidden fixed bottom-6 right-6 bg-gray-900 dark:bg-wiki-surface dark:border dark:border-wiki-border-active text-white dark:text-wiki-text text-sm px-4 py-2 rounded shadow-lg
+  <!-- "Saved" toast — deliberately a dark overlay chip in BOTH themes (text stays
+       white); gray-900 maps to the ADE raised token, not a theme surface. -->
+  <div id="toast-saved" data-i18n="toast.saved" class="hidden fixed bottom-6 right-6 bg-gray-900 dark:bg-gray-900 dark:border dark:border-wiki-border-active text-white dark:text-white text-sm px-4 py-2 rounded shadow-lg
        transition-opacity duration-300 opacity-0">
     Saved
   </div>
@@ -822,7 +955,7 @@
             Ignore all
           </button>
         </div>
-        <div id="files-list" class="border border-gray-200 dark:border-wiki-border rounded divide-y divide-gray-100 dark:divide-wiki-border
+        <div id="files-list" class="border border-gray-200 dark:border-wiki-border rounded divide-y divide-gray-200 dark:divide-wiki-border
                     overflow-y-auto" style="max-height: 320px;"></div>
         <div id="files-empty" data-i18n="files.empty" class="hidden text-gray-400 dark:text-wiki-text-muted text-sm mt-2">
           No files indexed yet. Use Rebuild Index to build the index.
@@ -840,13 +973,13 @@
             </button>
           </div>
           <div id="chunk-detail-neighbors" class="hidden px-3 py-2 border-b border-gray-100 dark:border-wiki-border text-xs text-gray-500 dark:text-wiki-text-muted"></div>
-          <div id="chunk-detail-body" class="divide-y divide-gray-100 dark:divide-wiki-border max-h-96 overflow-y-auto"></div>
+          <div id="chunk-detail-body" class="divide-y divide-gray-200 dark:divide-wiki-border max-h-96 overflow-y-auto"></div>
         </div>
 
         <!-- Ignored files panel -->
         <div id="ignored-files-section" class="hidden mt-4">
           <h3 data-i18n="files.ignoredHeading" class="font-wiki text-sm dark:text-wiki-heading text-gray-700 mb-2">Ignored files</h3>
-          <div id="ignored-files-list" class="border border-gray-200 dark:border-wiki-border rounded divide-y divide-gray-100 dark:divide-wiki-border overflow-y-auto" style="max-height: 200px;"></div>
+          <div id="ignored-files-list" class="border border-gray-200 dark:border-wiki-border rounded divide-y divide-gray-200 dark:divide-wiki-border overflow-y-auto" style="max-height: 200px;"></div>
         </div>
       </section>
     </div>
@@ -3518,16 +3651,34 @@ function updateThemeIcon() {
   document.getElementById('icon-sun').classList.toggle('hidden', !isDark);
   document.getElementById('icon-moon').classList.toggle('hidden', isDark);
 }
-document.getElementById('btn-theme').addEventListener('click', () => {
-  const isDark = document.documentElement.classList.toggle('dark');
-  localStorage.setItem('theme', isDark ? 'dark' : 'light');
+// Single funnel for every theme change: local toggle, boot, and Spec ADE host
+// messages. Keeps the `dark` class, localStorage, color-scheme, icons, and
+// graph repaint in sync — never flip the theme anywhere else.
+function applyAdeTheme(theme) {
+  if (theme !== 'light' && theme !== 'dark') return;
+  document.documentElement.classList.toggle('dark', theme === 'dark');
+  document.documentElement.style.colorScheme = theme;
+  localStorage.setItem('theme', theme);
   updateThemeIcon();
   // Graph edge/stroke colors are baked at draw time — repaint if it's visible.
   const explorerVisible = !document.getElementById('search-page').classList.contains('hidden')
     && !document.getElementById('subpanel-explorer').classList.contains('hidden');
   if (explorerVisible && graphData.nodes.length) { renderGraph(); }
+}
+// Live theme from the Spec ADE host iframe wrapper:
+// { source: 'spec-ade', type: 'ade:theme', theme: 'dark' | 'light' }
+window.addEventListener('message', (event) => {
+  const data = event.data;
+  if (!data || data.source !== 'spec-ade' || data.type !== 'ade:theme') return;
+  applyAdeTheme(data.theme);
+});
+document.getElementById('btn-theme').addEventListener('click', () => {
+  applyAdeTheme(document.documentElement.classList.contains('dark') ? 'light' : 'dark');
 });
 updateThemeIcon();
+// Reflect the class boot applied (inline boot script cannot set colorScheme).
+document.documentElement.style.colorScheme =
+  document.documentElement.classList.contains('dark') ? 'dark' : 'light';
 
 // ─── Repo detail page (Index Explorer + Search sub-tabs) ────────────────────
 let currentSearchRepo = null;
@@ -5009,8 +5160,9 @@ function runForceLayout(sim, links, degree, W, H) {
 
 function drawGraph(svg, nodes, links, sim, degree, W, H) {
   const isDark = document.documentElement.classList.contains('dark');
-  const edgeColor = isDark ? '#2e3a42' : '#d1d5db';
-  const labelColor = isDark ? '#8899a6' : '#6b7280';
+  // Chrome colors pulled from the ADE bridge tokens (see tailwind.config).
+  const edgeColor = isDark ? '#262b33' : '#d8dbe1';
+  const labelColor = isDark ? '#9aa0a9' : '#5c616b';
 
   const gEdges = document.createElementNS(SVG_NS, 'g');
   const gNodes = document.createElementNS(SVG_NS, 'g');
@@ -5039,7 +5191,7 @@ function drawGraph(svg, nodes, links, sim, degree, W, H) {
     circle.setAttribute('cy', sim[i].y);
     circle.setAttribute('r', r);
     circle.setAttribute('fill', langColor(n.file));
-    circle.setAttribute('stroke', isDark ? '#101418' : '#ffffff');
+    circle.setAttribute('stroke', isDark ? '#0c0d10' : '#f7f8fa');
     circle.setAttribute('stroke-width', '1.5');
 
     const title = document.createElementNS(SVG_NS, 'title');
@@ -5052,7 +5204,7 @@ function drawGraph(svg, nodes, links, sim, degree, W, H) {
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('font-size', '9');
     label.setAttribute('fill', labelColor);
-    label.setAttribute('font-family', 'ui-monospace, monospace');
+    label.setAttribute('font-family', 'Lilex, ui-monospace, monospace');
     label.style.pointerEvents = 'none';
     // Only label higher-degree nodes to avoid clutter on dense graphs.
     label.textContent = (nodes.length <= 40 || degree[i] >= 2) ? n.name : '';
