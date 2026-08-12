@@ -30,7 +30,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::Json;
 use axum::extract::{Path as AxumPath, Query as AxumQuery, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, post};
 use axum::{Router, extract::Request};

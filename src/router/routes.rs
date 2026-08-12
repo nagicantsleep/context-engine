@@ -1,6 +1,7 @@
 fn build_http_routes() -> Router<RouterState> {
     Router::new()
-        .route("/", get(serve_index))
+        .route("/", get(crate::assets::serve_index))
+        .route("/assets/fonts/:name", get(crate::assets::serve_font))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/repos", get(list_repos))
         .route("/api/embedding-cache", delete(delete_embedding_cache))

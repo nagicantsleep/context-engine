@@ -1,8 +1,5 @@
-async fn serve_index() -> impl IntoResponse {
-    // Same single-page UI the standalone server serves. Embedded at compile time.
-    let html = include_str!("../assets/index.html");
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
-}
+// UI (`/`) + ADE fonts (`/assets/fonts/:name`) are served by `crate::assets`
+// (shared with the standalone server) — see routes.rs.
 
 async fn get_config(State(state): State<RouterState>) -> Response {
     let home = state.home_dir.clone();
