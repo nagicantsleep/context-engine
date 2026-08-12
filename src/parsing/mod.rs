@@ -560,120 +560,270 @@ struct FlowSpec {
 }
 
 const RUST_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["let_declaration"], lhs_field: "pattern",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["let_declaration"],
+    lhs_field: "pattern",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
 };
 const PYTHON_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["assignment"], lhs_field: "left",
-    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["identifier"],
+    call_kind: "call",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment"],
+    lhs_field: "left",
+    rhs_field: Some("right"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"],
+    param_ident_kinds: &["identifier"],
 };
 const GO_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["short_var_declaration"], lhs_field: "left",
-    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &["expression_list"],
-    rhs_unwrap_kinds: &["expression_list"], stmt_unwrap: &[], param_ident_kinds: &["identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["short_var_declaration"],
+    lhs_field: "left",
+    rhs_field: Some("right"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &["expression_list"],
+    rhs_unwrap_kinds: &["expression_list"],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
 };
 const JS_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["variable_declarator"], lhs_field: "name",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["lexical_declaration", "variable_declaration"], param_ident_kinds: &["identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["variable_declarator"],
+    lhs_field: "name",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["lexical_declaration", "variable_declaration"],
+    param_ident_kinds: &["identifier"],
 };
 const RUBY_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call", callee: NodeRef::Field("method"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["assignment"], lhs_field: "left",
-    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
+    call_kind: "call",
+    callee: NodeRef::Field("method"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment"],
+    lhs_field: "left",
+    rhs_field: Some("right"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
 };
 const JAVA_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "method_invocation", callee: NodeRef::Field("name"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["variable_declarator"], lhs_field: "name",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["local_variable_declaration"], param_ident_kinds: &["identifier"],
+    call_kind: "method_invocation",
+    callee: NodeRef::Field("name"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["variable_declarator"],
+    lhs_field: "name",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_variable_declaration"],
+    param_ident_kinds: &["identifier"],
 };
 const DART_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["initialized_variable_definition"], lhs_field: "name",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["local_variable_declaration"], param_ident_kinds: &["identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["initialized_variable_definition"],
+    lhs_field: "name",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_variable_declaration"],
+    param_ident_kinds: &["identifier"],
 };
 const PASCAL_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "exprCall", callee: NodeRef::Field("entity"), args: NodeRef::Field("args"),
-    arg_unwrap_kinds: &[], binding_kinds: &["assignment"], lhs_field: "lhs",
-    rhs_field: Some("rhs"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
+    call_kind: "exprCall",
+    callee: NodeRef::Field("entity"),
+    args: NodeRef::Field("args"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment"],
+    lhs_field: "lhs",
+    rhs_field: Some("rhs"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
 };
 const CSHARP_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "invocation_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &["argument"], binding_kinds: &["variable_declarator"], lhs_field: "name",
-    rhs_field: None, rhs_child_kind: Some("invocation_expression"), lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["local_declaration_statement", "variable_declaration"], param_ident_kinds: &["identifier"],
+    call_kind: "invocation_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &["argument"],
+    binding_kinds: &["variable_declarator"],
+    lhs_field: "name",
+    rhs_field: None,
+    rhs_child_kind: Some("invocation_expression"),
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["local_declaration_statement", "variable_declaration"],
+    param_ident_kinds: &["identifier"],
 };
 const PHP_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "function_call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &["argument"], binding_kinds: &["assignment_expression"], lhs_field: "left",
-    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["variable_name"],
+    call_kind: "function_call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &["argument"],
+    binding_kinds: &["assignment_expression"],
+    lhs_field: "left",
+    rhs_field: Some("right"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"],
+    param_ident_kinds: &["variable_name"],
 };
 const C_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["init_declarator"], lhs_field: "declarator",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["declaration"], param_ident_kinds: &["identifier", "field_identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["init_declarator"],
+    lhs_field: "declarator",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["declaration"],
+    param_ident_kinds: &["identifier", "field_identifier"],
 };
 const C_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["assignment_expression"], lhs_field: "left",
-    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["identifier", "field_identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment_expression"],
+    lhs_field: "left",
+    rhs_field: Some("right"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"],
+    param_ident_kinds: &["identifier", "field_identifier"],
 };
 const CPP_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["init_declarator"], lhs_field: "declarator",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["declaration"], param_ident_kinds: &["identifier", "field_identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["init_declarator"],
+    lhs_field: "declarator",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["declaration"],
+    param_ident_kinds: &["identifier", "field_identifier"],
 };
 const CPP_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Field("function"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["assignment_expression"], lhs_field: "left",
-    rhs_field: Some("right"), rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &["expression_statement"], param_ident_kinds: &["identifier", "field_identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Field("function"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment_expression"],
+    lhs_field: "left",
+    rhs_field: Some("right"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &["expression_statement"],
+    param_ident_kinds: &["identifier", "field_identifier"],
 };
 const LUA_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "function_call", callee: NodeRef::Field("name"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["assignment_statement"], lhs_field: "name",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &["variable_list"],
-    rhs_unwrap_kinds: &["expression_list"], stmt_unwrap: &["variable_declaration"],
+    call_kind: "function_call",
+    callee: NodeRef::Field("name"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment_statement"],
+    lhs_field: "name",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &["variable_list"],
+    rhs_unwrap_kinds: &["expression_list"],
+    stmt_unwrap: &["variable_declaration"],
     param_ident_kinds: &["identifier"],
 };
 const LUAU_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "function_call", callee: NodeRef::Field("name"), args: NodeRef::Field("arguments"),
-    arg_unwrap_kinds: &[], binding_kinds: &["assignment_statement"], lhs_field: "name",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &["variable_list"],
-    rhs_unwrap_kinds: &["expression_list"], stmt_unwrap: &["variable_declaration"],
+    call_kind: "function_call",
+    callee: NodeRef::Field("name"),
+    args: NodeRef::Field("arguments"),
+    arg_unwrap_kinds: &[],
+    binding_kinds: &["assignment_statement"],
+    lhs_field: "name",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &["variable_list"],
+    rhs_unwrap_kinds: &["expression_list"],
+    stmt_unwrap: &["variable_declaration"],
     param_ident_kinds: &["identifier"],
 };
 const SWIFT_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Child(0), args: NodeRef::ChildOfKind("value_arguments"),
-    arg_unwrap_kinds: &["value_argument"], binding_kinds: &["property_declaration"], lhs_field: "name",
-    rhs_field: Some("value"), rhs_child_kind: None, lhs_unwrap_kinds: &["pattern"], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[], param_ident_kinds: &["simple_identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Child(0),
+    args: NodeRef::ChildOfKind("value_arguments"),
+    arg_unwrap_kinds: &["value_argument"],
+    binding_kinds: &["property_declaration"],
+    lhs_field: "name",
+    rhs_field: Some("value"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &["pattern"],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["simple_identifier"],
 };
 const SWIFT_ASSIGNMENT_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::Child(0), args: NodeRef::ChildOfKind("value_arguments"),
-    arg_unwrap_kinds: &["value_argument"], binding_kinds: &["assignment"], lhs_field: "target",
-    rhs_field: Some("result"), rhs_child_kind: None, lhs_unwrap_kinds: &["directly_assignable_expression"],
-    rhs_unwrap_kinds: &[], stmt_unwrap: &[], param_ident_kinds: &["simple_identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::Child(0),
+    args: NodeRef::ChildOfKind("value_arguments"),
+    arg_unwrap_kinds: &["value_argument"],
+    binding_kinds: &["assignment"],
+    lhs_field: "target",
+    rhs_field: Some("result"),
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &["directly_assignable_expression"],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["simple_identifier"],
 };
 const KOTLIN_FLOW_SPEC: FlowSpec = FlowSpec {
-    call_kind: "call_expression", callee: NodeRef::NamedChildOfKindOrChild("expression", 0), args: NodeRef::ChildOfKind("value_arguments"),
-    arg_unwrap_kinds: &["value_argument"], binding_kinds: &[], lhs_field: "",
-    rhs_field: None, rhs_child_kind: None, lhs_unwrap_kinds: &[], rhs_unwrap_kinds: &[],
-    stmt_unwrap: &[], param_ident_kinds: &["identifier"],
+    call_kind: "call_expression",
+    callee: NodeRef::NamedChildOfKindOrChild("expression", 0),
+    args: NodeRef::ChildOfKind("value_arguments"),
+    arg_unwrap_kinds: &["value_argument"],
+    binding_kinds: &[],
+    lhs_field: "",
+    rhs_field: None,
+    rhs_child_kind: None,
+    lhs_unwrap_kinds: &[],
+    rhs_unwrap_kinds: &[],
+    stmt_unwrap: &[],
+    param_ident_kinds: &["identifier"],
 };
 fn luau_parameter_ident<'a>(parameter: Node<'a>) -> Option<Node<'a>> {
     if parameter.kind() != "parameter" {
@@ -757,29 +907,29 @@ fn collect_param_forward_edges<'a>(
     from_sym: &QualifiedSymbol,
     edges: &mut Vec<RawEdge>,
 ) {
-    if node.kind() == spec.call_kind {
-        if let Some(func_node) = spec.callee.resolve(node) {
-            let callee_name = node_text(&func_node, source).to_string();
-            if let Some(args_node) = spec.args.resolve(node) {
-                let mut acursor = args_node.walk();
-                let forwards_param = args_node.children(&mut acursor).any(|child| {
-                    resolve_ident_arg(child, spec)
-                        .map(|id| param_names.contains(node_text(&id, source)))
-                        .unwrap_or(false)
+    if node.kind() == spec.call_kind
+        && let Some(func_node) = spec.callee.resolve(node)
+    {
+        let callee_name = node_text(&func_node, source).to_string();
+        if let Some(args_node) = spec.args.resolve(node) {
+            let mut acursor = args_node.walk();
+            let forwards_param = args_node.children(&mut acursor).any(|child| {
+                resolve_ident_arg(child, spec)
+                    .map(|id| param_names.contains(node_text(&id, source)))
+                    .unwrap_or(false)
+            });
+            if forwards_param {
+                edges.push(RawEdge {
+                    from: from_sym.clone(),
+                    to: EdgeTarget::Unresolved {
+                        name: callee_name,
+                        import_path: None,
+                        qualifier: None,
+                    },
+                    kind: EdgeKind::DataFlowsTo,
+                    line: node_line_start(node),
+                    confidence: Confidence::Inferred(0.75),
                 });
-                if forwards_param {
-                    edges.push(RawEdge {
-                        from: from_sym.clone(),
-                        to: EdgeTarget::Unresolved {
-                            name: callee_name,
-                            import_path: None,
-                            qualifier: None,
-                        },
-                        kind: EdgeKind::DataFlowsTo,
-                        line: node_line_start(node),
-                        confidence: Confidence::Inferred(0.75),
-                    });
-                }
             }
         }
     }
@@ -857,28 +1007,28 @@ fn collect_intermediate_flow_edges<'a>(
 
             if let (Some(var), Some(callee)) = (var_name, rhs_callee) {
                 let mut chain_depth = 1usize;
-                if let Some(rhs_node) = resolve_rhs(asgn, spec) {
-                    if let Some(args_node) = spec.args.resolve(&rhs_node) {
-                        let mut acursor = args_node.walk();
-                        for arg in args_node.children(&mut acursor) {
-                            if let Some(id) = resolve_ident_arg(arg, spec) {
-                                let arg_name = node_text(&id, source);
-                                if let Some((_src_callee, depth)) = var_map.get(arg_name) {
-                                    let line = node_line_start(&rhs_node);
-                                    edges.push(RawEdge {
-                                        from: from_sym.clone(),
-                                        to: EdgeTarget::Unresolved {
-                                            name: callee.clone(),
-                                            import_path: None,
-                                            qualifier: None,
-                                        },
-                                        kind: EdgeKind::DataFlowsTo,
-                                        line,
-                                        confidence: Confidence::Inferred(0.6),
-                                    });
-                                    chain_depth = depth + 1;
-                                    break;
-                                }
+                if let Some(rhs_node) = resolve_rhs(asgn, spec)
+                    && let Some(args_node) = spec.args.resolve(&rhs_node)
+                {
+                    let mut acursor = args_node.walk();
+                    for arg in args_node.children(&mut acursor) {
+                        if let Some(id) = resolve_ident_arg(arg, spec) {
+                            let arg_name = node_text(&id, source);
+                            if let Some((_src_callee, depth)) = var_map.get(arg_name) {
+                                let line = node_line_start(&rhs_node);
+                                edges.push(RawEdge {
+                                    from: from_sym.clone(),
+                                    to: EdgeTarget::Unresolved {
+                                        name: callee.clone(),
+                                        import_path: None,
+                                        qualifier: None,
+                                    },
+                                    kind: EdgeKind::DataFlowsTo,
+                                    line,
+                                    confidence: Confidence::Inferred(0.6),
+                                });
+                                chain_depth = depth + 1;
+                                break;
                             }
                         }
                     }
@@ -965,14 +1115,7 @@ fn collect_kotlin_intermediate_flow_edges<'a>(
                 }
             }
         } else {
-            scan_calls(
-                &KOTLIN_FLOW_SPEC,
-                source,
-                &stmt,
-                &var_map,
-                from_sym,
-                edges,
-            );
+            scan_calls(&KOTLIN_FLOW_SPEC, source, &stmt, &var_map, from_sym, edges);
         }
     }
 }
@@ -1036,28 +1179,28 @@ fn extract_python_node(
                                 param_names.insert(node_text(&param, source));
                             }
                             "typed_parameter" | "default_parameter" => {
-                                if let Some(name_node) = param.child_by_field_name("name") {
-                                    if name_node.kind() == "identifier" {
-                                        param_names.insert(node_text(&name_node, source));
-                                    }
+                                if let Some(name_node) = param.child_by_field_name("name")
+                                    && name_node.kind() == "identifier"
+                                {
+                                    param_names.insert(node_text(&name_node, source));
                                 }
                             }
                             _ => {}
                         }
                     }
                 }
-                if !param_names.is_empty() {
-                    if let Some(body_node) = node.child_by_field_name("body") {
-                        collect_param_forward_edges(
-                            &PYTHON_FLOW_SPEC,
-                            file,
-                            source,
-                            &body_node,
-                            &param_names,
-                            &func_sym,
-                            edges,
-                        );
-                    }
+                if !param_names.is_empty()
+                    && let Some(body_node) = node.child_by_field_name("body")
+                {
+                    collect_param_forward_edges(
+                        &PYTHON_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &param_names,
+                        &func_sym,
+                        edges,
+                    );
                 }
                 if let Some(body_node) = node.child_by_field_name("body") {
                     collect_intermediate_flow_edges(
@@ -1156,22 +1299,22 @@ fn extract_python_node(
         "return_statement" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.kind() == "call" {
-                    if let Some(func_node) = child.child_by_field_name("function") {
-                        let callee_name = node_text(&func_node, source).to_string();
-                        if let Some(from_sym) = scope_to_qualified(file, scope) {
-                            edges.push(RawEdge {
-                                from: from_sym,
-                                to: EdgeTarget::Unresolved {
-                                    name: callee_name,
-                                    import_path: None,
-                                    qualifier: None,
-                                },
-                                kind: EdgeKind::DataFlowsTo,
-                                line: node_line_start(&child),
-                                confidence: Confidence::Extracted,
-                            });
-                        }
+                if child.kind() == "call"
+                    && let Some(func_node) = child.child_by_field_name("function")
+                {
+                    let callee_name = node_text(&func_node, source).to_string();
+                    if let Some(from_sym) = scope_to_qualified(file, scope) {
+                        edges.push(RawEdge {
+                            from: from_sym,
+                            to: EdgeTarget::Unresolved {
+                                name: callee_name,
+                                import_path: None,
+                                qualifier: None,
+                            },
+                            kind: EdgeKind::DataFlowsTo,
+                            line: node_line_start(&child),
+                            confidence: Confidence::Extracted,
+                        });
                     }
                 }
                 // Recurse so the call child also emits its Calls edge.
@@ -1255,18 +1398,18 @@ fn extract_js_node(
                     }
                 }
             }
-            if !param_names.is_empty() {
-                if let Some(body_node) = node.child_by_field_name("body") {
-                    collect_param_forward_edges(
-                        &JS_FLOW_SPEC,
-                        file,
-                        source,
-                        &body_node,
-                        &param_names,
-                        &func_sym,
-                        edges,
-                    );
-                }
+            if !param_names.is_empty()
+                && let Some(body_node) = node.child_by_field_name("body")
+            {
+                collect_param_forward_edges(
+                    &JS_FLOW_SPEC,
+                    file,
+                    source,
+                    &body_node,
+                    &param_names,
+                    &func_sym,
+                    edges,
+                );
             }
             if let Some(body_node) = node.child_by_field_name("body") {
                 collect_intermediate_flow_edges(
@@ -1357,15 +1500,15 @@ fn extract_js_node(
         }
         "member_expression" => {
             // Check for JS taint sources expressed as property accesses (req.body, etc.)
-            let member_text = node_text(&node, source).to_string();
-            if let Some(from_sym) = scope_to_qualified(file, scope) {
-                if let Some(taint_edge) = crate::parsing::taint::emit_js_member_taint_edge(
+            let member_text = node_text(node, source).to_string();
+            if let Some(from_sym) = scope_to_qualified(file, scope)
+                && let Some(taint_edge) = crate::parsing::taint::emit_js_member_taint_edge(
                     &from_sym,
                     &member_text,
                     node_line_start(node),
-                ) {
-                    edges.push(taint_edge);
-                }
+                )
+            {
+                edges.push(taint_edge);
             }
             // Recurse into children
             let mut cursor = node.walk();
@@ -1442,27 +1585,26 @@ fn extract_rust_node(
                 if let Some(params_node) = node.child_by_field_name("parameters") {
                     let mut pcursor = params_node.walk();
                     for param in params_node.children(&mut pcursor) {
-                        if param.kind() == "parameter" {
-                            if let Some(pat) = param.child_by_field_name("pattern") {
-                                if pat.kind() == "identifier" {
-                                    param_names.insert(node_text(&pat, source));
-                                }
-                            }
+                        if param.kind() == "parameter"
+                            && let Some(pat) = param.child_by_field_name("pattern")
+                            && pat.kind() == "identifier"
+                        {
+                            param_names.insert(node_text(&pat, source));
                         }
                     }
                 }
-                if !param_names.is_empty() {
-                    if let Some(body_node) = node.child_by_field_name("body") {
-                        collect_param_forward_edges(
-                            &RUST_FLOW_SPEC,
-                            file,
-                            source,
-                            &body_node,
-                            &param_names,
-                            &func_sym,
-                            edges,
-                        );
-                    }
+                if !param_names.is_empty()
+                    && let Some(body_node) = node.child_by_field_name("body")
+                {
+                    collect_param_forward_edges(
+                        &RUST_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &param_names,
+                        &func_sym,
+                        edges,
+                    );
                 }
                 if let Some(body_node) = node.child_by_field_name("body") {
                     collect_intermediate_flow_edges(
@@ -1634,22 +1776,22 @@ fn extract_rust_node(
         "return_expression" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.kind() == "call_expression" {
-                    if let Some(func_node) = child.child_by_field_name("function") {
-                        let callee_name = node_text(&func_node, source).to_string();
-                        if let Some(from_sym) = scope_to_qualified(file, scope) {
-                            edges.push(RawEdge {
-                                from: from_sym,
-                                to: EdgeTarget::Unresolved {
-                                    name: callee_name,
-                                    import_path: None,
-                                    qualifier: None,
-                                },
-                                kind: EdgeKind::DataFlowsTo,
-                                line: node_line_start(&child),
-                                confidence: Confidence::Extracted,
-                            });
-                        }
+                if child.kind() == "call_expression"
+                    && let Some(func_node) = child.child_by_field_name("function")
+                {
+                    let callee_name = node_text(&func_node, source).to_string();
+                    if let Some(from_sym) = scope_to_qualified(file, scope) {
+                        edges.push(RawEdge {
+                            from: from_sym,
+                            to: EdgeTarget::Unresolved {
+                                name: callee_name,
+                                import_path: None,
+                                qualifier: None,
+                            },
+                            kind: EdgeKind::DataFlowsTo,
+                            line: node_line_start(&child),
+                            confidence: Confidence::Extracted,
+                        });
                     }
                 }
                 // Recurse so the call_expression child also emits its Calls edge.
@@ -1726,18 +1868,18 @@ fn extract_go_node(
                     }
                 }
             }
-            if !param_names.is_empty() {
-                if let Some(body_node) = node.child_by_field_name("body") {
-                    collect_param_forward_edges(
-                        &GO_FLOW_SPEC,
-                        file,
-                        source,
-                        &body_node,
-                        &param_names,
-                        &func_sym,
-                        edges,
-                    );
-                }
+            if !param_names.is_empty()
+                && let Some(body_node) = node.child_by_field_name("body")
+            {
+                collect_param_forward_edges(
+                    &GO_FLOW_SPEC,
+                    file,
+                    source,
+                    &body_node,
+                    &param_names,
+                    &func_sym,
+                    edges,
+                );
             }
             if let Some(body_node) = node.child_by_field_name("body") {
                 collect_intermediate_flow_edges(
@@ -1896,25 +2038,25 @@ fn extract_java_node(
                 if let Some(params_node) = node.child_by_field_name("parameters") {
                     let mut pcursor = params_node.walk();
                     for param in params_node.children(&mut pcursor) {
-                        if param.kind() == "formal_parameter" {
-                            if let Some(ident) = param.child_by_field_name("name") {
-                                param_names.insert(node_text(&ident, source));
-                            }
+                        if param.kind() == "formal_parameter"
+                            && let Some(ident) = param.child_by_field_name("name")
+                        {
+                            param_names.insert(node_text(&ident, source));
                         }
                     }
                 }
-                if !param_names.is_empty() {
-                    if let Some(body_node) = node.child_by_field_name("body") {
-                        collect_param_forward_edges(
-                            &JAVA_FLOW_SPEC,
-                            file,
-                            source,
-                            &body_node,
-                            &param_names,
-                            &func_sym,
-                            edges,
-                        );
-                    }
+                if !param_names.is_empty()
+                    && let Some(body_node) = node.child_by_field_name("body")
+                {
+                    collect_param_forward_edges(
+                        &JAVA_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &param_names,
+                        &func_sym,
+                        edges,
+                    );
                 }
                 if let Some(body_node) = node.child_by_field_name("body") {
                     collect_intermediate_flow_edges(
@@ -2053,13 +2195,9 @@ fn c_cpp_param_names<'a>(
         Some(*declarator)
     } else {
         let mut cursor = declarator.walk();
-        declarator.named_children(&mut cursor).find_map(|child| {
-            if child.kind() == "function_declarator" {
-                Some(child)
-            } else {
-                None
-            }
-        })
+        declarator
+            .named_children(&mut cursor)
+            .find(|child| child.kind() == "function_declarator")
     };
     let Some(function_decl) = function_decl else {
         return HashSet::new();
@@ -2589,22 +2727,34 @@ fn extract_csharp_node(
                 if let Some(params_node) = node.child_by_field_name("parameters") {
                     let mut pcursor = params_node.walk();
                     for param in params_node.named_children(&mut pcursor) {
-                        if let Some(name_node) = param.child_by_field_name("name") {
-                            if CSHARP_FLOW_SPEC.param_ident_kinds.contains(&name_node.kind()) {
-                                param_names.insert(node_text(&name_node, source));
-                            }
+                        if let Some(name_node) = param.child_by_field_name("name")
+                            && CSHARP_FLOW_SPEC
+                                .param_ident_kinds
+                                .contains(&name_node.kind())
+                        {
+                            param_names.insert(node_text(&name_node, source));
                         }
                     }
                 }
                 if let Some(body_node) = node.child_by_field_name("body") {
                     if !param_names.is_empty() {
                         collect_param_forward_edges(
-                            &CSHARP_FLOW_SPEC, file, source, &body_node, &param_names, &func_sym,
+                            &CSHARP_FLOW_SPEC,
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
                             edges,
                         );
                     }
                     collect_intermediate_flow_edges(
-                        &CSHARP_FLOW_SPEC, file, source, &body_node, &func_sym, edges,
+                        &CSHARP_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
                     );
                 }
                 let mut child_scope = scope.to_vec();
@@ -2870,12 +3020,22 @@ fn extract_php_node(
                 if let Some(body_node) = node.child_by_field_name("body") {
                     if !param_names.is_empty() {
                         collect_param_forward_edges(
-                            &PHP_FLOW_SPEC, file, source, &body_node, &param_names, &func_sym,
+                            &PHP_FLOW_SPEC,
+                            file,
+                            source,
+                            &body_node,
+                            &param_names,
+                            &func_sym,
                             edges,
                         );
                     }
                     collect_intermediate_flow_edges(
-                        &PHP_FLOW_SPEC, file, source, &body_node, &func_sym, edges,
+                        &PHP_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &func_sym,
+                        edges,
                     );
                 }
                 let mut child_scope = scope.to_vec();
@@ -3178,18 +3338,18 @@ fn extract_ruby_node(
                         }
                     }
                 }
-                if !param_names.is_empty() {
-                    if let Some(body_node) = node.child_by_field_name("body") {
-                        collect_param_forward_edges(
-                            &RUBY_FLOW_SPEC,
-                            file,
-                            source,
-                            &body_node,
-                            &param_names,
-                            &func_sym,
-                            edges,
-                        );
-                    }
+                if !param_names.is_empty()
+                    && let Some(body_node) = node.child_by_field_name("body")
+                {
+                    collect_param_forward_edges(
+                        &RUBY_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &param_names,
+                        &func_sym,
+                        edges,
+                    );
                 }
                 if let Some(body_node) = node.child_by_field_name("body") {
                     collect_intermediate_flow_edges(
@@ -3599,36 +3759,36 @@ fn extract_swift_node(
                     }
                 }
             }
-            if let Some(body_node) = node.child_by_field_name("body") {
-                if let Some(statements) = NodeRef::ChildOfKind("statements").resolve(&body_node) {
-                    if !param_names.is_empty() {
-                        collect_param_forward_edges(
-                            &SWIFT_FLOW_SPEC,
-                            file,
-                            source,
-                            &statements,
-                            &param_names,
-                            &func_sym,
-                            edges,
-                        );
-                    }
-                    collect_intermediate_flow_edges(
+            if let Some(body_node) = node.child_by_field_name("body")
+                && let Some(statements) = NodeRef::ChildOfKind("statements").resolve(&body_node)
+            {
+                if !param_names.is_empty() {
+                    collect_param_forward_edges(
                         &SWIFT_FLOW_SPEC,
                         file,
                         source,
                         &statements,
-                        &func_sym,
-                        edges,
-                    );
-                    collect_intermediate_flow_edges(
-                        &SWIFT_ASSIGNMENT_FLOW_SPEC,
-                        file,
-                        source,
-                        &statements,
+                        &param_names,
                         &func_sym,
                         edges,
                     );
                 }
+                collect_intermediate_flow_edges(
+                    &SWIFT_FLOW_SPEC,
+                    file,
+                    source,
+                    &statements,
+                    &func_sym,
+                    edges,
+                );
+                collect_intermediate_flow_edges(
+                    &SWIFT_ASSIGNMENT_FLOW_SPEC,
+                    file,
+                    source,
+                    &statements,
+                    &func_sym,
+                    edges,
+                );
             }
 
             let mut child_scope = scope.to_vec();
@@ -3850,14 +4010,18 @@ fn extract_kotlin_node(
                 symbols.push(sym);
 
                 let mut param_names: HashSet<&str> = HashSet::new();
-                if let Some(params) = NodeRef::ChildOfKind("function_value_parameters").resolve(node) {
+                if let Some(params) =
+                    NodeRef::ChildOfKind("function_value_parameters").resolve(node)
+                {
                     let mut params_cursor = params.walk();
                     for parameter in params.named_children(&mut params_cursor) {
                         if parameter.kind() == "parameter" {
                             let mut parameter_cursor = parameter.walk();
                             if let Some(identifier) = parameter
                                 .named_children(&mut parameter_cursor)
-                                .find(|child| KOTLIN_FLOW_SPEC.param_ident_kinds.contains(&child.kind()))
+                                .find(|child| {
+                                    KOTLIN_FLOW_SPEC.param_ident_kinds.contains(&child.kind())
+                                })
                             {
                                 param_names.insert(node_text(&identifier, source));
                             }
@@ -4044,10 +4208,9 @@ fn dart_find_function_name(node: &Node, source: &str) -> Option<String> {
                 if let Some(function_signature) = child
                     .children(&mut signature_cursor)
                     .find(|c| c.kind() == "function_signature")
+                    && let Some(n) = function_signature.child_by_field_name("name")
                 {
-                    if let Some(n) = function_signature.child_by_field_name("name") {
-                        return Some(node_text(&n, source).to_string());
-                    }
+                    return Some(node_text(&n, source).to_string());
                 }
             }
             // Try positional identifier
@@ -4126,31 +4289,31 @@ fn extract_dart_node(
                             .children(&mut scursor)
                             .find(|c| c.kind() == "function_signature")
                     };
-                    if let Some(fn_sig) = fn_sig {
-                        if let Some(params_node) = fn_sig.child_by_field_name("parameters") {
-                            let mut pcursor = params_node.walk();
-                            for param in params_node.children(&mut pcursor) {
-                                if param.kind() == "formal_parameter" {
-                                    if let Some(ident) = param.child_by_field_name("name") {
-                                        param_names.insert(node_text(&ident, source));
-                                    }
-                                }
+                    if let Some(fn_sig) = fn_sig
+                        && let Some(params_node) = fn_sig.child_by_field_name("parameters")
+                    {
+                        let mut pcursor = params_node.walk();
+                        for param in params_node.children(&mut pcursor) {
+                            if param.kind() == "formal_parameter"
+                                && let Some(ident) = param.child_by_field_name("name")
+                            {
+                                param_names.insert(node_text(&ident, source));
                             }
                         }
                     }
                 }
-                if !param_names.is_empty() {
-                    if let Some(body_node) = node.child_by_field_name("body") {
-                        collect_param_forward_edges(
-                            &DART_FLOW_SPEC,
-                            file,
-                            source,
-                            &body_node,
-                            &param_names,
-                            &func_sym,
-                            edges,
-                        );
-                    }
+                if !param_names.is_empty()
+                    && let Some(body_node) = node.child_by_field_name("body")
+                {
+                    collect_param_forward_edges(
+                        &DART_FLOW_SPEC,
+                        file,
+                        source,
+                        &body_node,
+                        &param_names,
+                        &func_sym,
+                        edges,
+                    );
                 }
                 // `function_body` wraps the real statements in a `block` child
                 // (absent for arrow bodies `=> expr;`); descend to it so
@@ -4711,20 +4874,18 @@ fn extract_pascal_node(
                 let fqn = sym.qualified.fqn();
                 let func_sym = sym.qualified.clone();
                 let mut param_names: HashSet<&str> = HashSet::new();
-                if let Some(header_node) = node.child_by_field_name("header") {
-                    if let Some(args_node) = header_node.child_by_field_name("args") {
-                        let mut acursor = args_node.walk();
-                        for arg in args_node.children(&mut acursor) {
-                            if arg.kind() == "declArg" {
-                                if let Some(name_node) = arg.child_by_field_name("name") {
-                                    if PASCAL_FLOW_SPEC
-                                        .param_ident_kinds
-                                        .contains(&name_node.kind())
-                                    {
-                                        param_names.insert(node_text(&name_node, source));
-                                    }
-                                }
-                            }
+                if let Some(header_node) = node.child_by_field_name("header")
+                    && let Some(args_node) = header_node.child_by_field_name("args")
+                {
+                    let mut acursor = args_node.walk();
+                    for arg in args_node.children(&mut acursor) {
+                        if arg.kind() == "declArg"
+                            && let Some(name_node) = arg.child_by_field_name("name")
+                            && PASCAL_FLOW_SPEC
+                                .param_ident_kinds
+                                .contains(&name_node.kind())
+                        {
+                            param_names.insert(node_text(&name_node, source));
                         }
                     }
                 }
@@ -5332,7 +5493,11 @@ mod c_data_flow_tests {
     }
 
     fn assert_data_flow_to(edges: &[RawEdge], target: &str) {
-        assert_eq!(edges.len(), 1, "expected exactly one data-flow edge: {edges:?}");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected exactly one data-flow edge: {edges:?}"
+        );
         assert_eq!(edges[0].kind, EdgeKind::DataFlowsTo);
         match &edges[0].to {
             EdgeTarget::Unresolved { name, .. } => assert_eq!(name, target),
@@ -5378,7 +5543,11 @@ mod cpp_data_flow_tests {
     }
 
     fn assert_data_flow_to(edges: &[RawEdge], target: &str) {
-        assert_eq!(edges.len(), 1, "expected exactly one data-flow edge: {edges:?}");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected exactly one data-flow edge: {edges:?}"
+        );
         assert_eq!(edges[0].kind, EdgeKind::DataFlowsTo);
         match &edges[0].to {
             EdgeTarget::Unresolved { name, .. } => assert_eq!(name, target),
@@ -5682,7 +5851,11 @@ mod kotlin_data_flow_tests {
     }
 
     fn assert_data_flow_to(edges: &[RawEdge], target: &str, confidence: Confidence) {
-        assert_eq!(edges.len(), 1, "expected exactly one data-flow edge: {edges:?}");
+        assert_eq!(
+            edges.len(),
+            1,
+            "expected exactly one data-flow edge: {edges:?}"
+        );
         match &edges[0].to {
             EdgeTarget::Unresolved { name, .. } => assert_eq!(name, target),
             _ => panic!("expected unresolved {target} target"),
@@ -5944,7 +6117,10 @@ func g(x: Int) {
 }
 "#,
         );
-        assert!(edges.is_empty(), "literal argument emitted DataFlowsTo: {edges:?}");
+        assert!(
+            edges.is_empty(),
+            "literal argument emitted DataFlowsTo: {edges:?}"
+        );
     }
 
     #[test]
@@ -6231,7 +6407,10 @@ function g(x: number)
 end
 "#,
         );
-        assert!(edges.is_empty(), "literal argument emitted DataFlowsTo: {edges:?}");
+        assert!(
+            edges.is_empty(),
+            "literal argument emitted DataFlowsTo: {edges:?}"
+        );
     }
 
     #[test]
@@ -6270,7 +6449,6 @@ end
         assert_eq!(edges[0].confidence, Confidence::Inferred(0.6));
     }
 }
-
 
 #[cfg(test)]
 mod luau_tests {

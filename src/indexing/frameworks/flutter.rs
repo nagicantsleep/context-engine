@@ -72,16 +72,14 @@ impl FrameworkResolver for FlutterResolver {
 
     fn detect(&self, ctx: &DetectionContext) -> bool {
         for file in ctx.file_set.iter() {
-            if file.ends_with("pubspec.yaml") {
-                if let Some(content) = (ctx.read_file)(file) {
-                    if content.contains("  flutter:")
-                        || content.contains("\nflutter:")
-                        || content.contains("flutter_test:")
-                        || content.contains("sdk: flutter")
-                    {
-                        return true;
-                    }
-                }
+            if file.ends_with("pubspec.yaml")
+                && let Some(content) = (ctx.read_file)(file)
+                && (content.contains("  flutter:")
+                    || content.contains("\nflutter:")
+                    || content.contains("flutter_test:")
+                    || content.contains("sdk: flutter"))
+            {
+                return true;
             }
         }
         false

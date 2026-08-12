@@ -49,9 +49,16 @@ dependency).
 ```bash
 cargo build --release            # build
 cargo run                        # router on 127.0.0.1:6699
+curl http://127.0.0.1:6699/api/config  # worker-free smoke check
 cargo run -- --port 8080         # custom port
 cargo test                       # run test suite
 ```
+
+The router handles the UI/config surface and starts per-repo workers for
+action requests. Read-only detail routes use sidecars/cold state without
+spawning. Global `/mcp` calls choose a repo with `workspace_full_path`; fresh
+settings enable `codebase-retrieval`, while `file-retrieval` needs explicit UI/
+settings enablement.
 
 ### Key paths
 
@@ -67,12 +74,12 @@ cargo test                       # run test suite
 | `docs/WORKFLOW.md` | Canonical agent task workflow |
 
 ### Default runtime paths
-
 | Item | Default path |
 |------|-------------|
 | Settings | `~/.vibervn/context-engine/settings.json` |
-| Per-repo SurrealDB | `~/.vibervn/context-engine/rocksdb/<name>/` |
+| Per-repo SurrealDB | generation 0: `~/.vibervn/context-engine/rocksdb/<name>/`; generation >=1: `~/.vibervn/context-engine/rocksdb/<generation>/<name>/` |
 | Embedding cache | `~/.vibervn/context-engine/embeddings/` |
+| Router sidecars | `~/.vibervn/context-engine/sidecar/` |
 
 ## Multi-agent engineering workflow
 

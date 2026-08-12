@@ -1,10 +1,12 @@
 //! ROUTER mode: the lightweight front-end of the process-per-project design.
 //!
-//! The router holds NO per-repo index — no `IndexEngine`, no open RocksDB
-//! handle, no resident vector shard. Its job is:
+//! The router holds NO resident per-repo index or handle — no `IndexEngine`,
+//! no open RocksDB handle retained between requests, no resident vector shard.
+//! Its job is:
 //! - serve the UI (`/`) and global config endpoints (`/api/config`) natively,
 //! - render the repo list + cold `/index-stats` / `/graph` from per-repo
-//!   [`sidecar`] files (no DB open, no worker spawn),
+//!   [`sidecar`] files (no resident per-repo index/handle, no worker spawn;
+//!   one-time background backfill may open sidecar-less DBs once),
 //! - reverse-proxy every per-repo operation (query, index, MCP, chunks, chat,
 //!   SSE events) to an on-demand worker process via [`proxy`], spawning and
 //!   reaping workers through the [`registry`] + [`spawn`] + [`jobobject`].
@@ -78,17 +80,19 @@ pub struct RouterState {
     pub proxy: ProxyCtx,
 }
 
-/// Build the router-mode axum app: load settings + resolve dirs (NO IndexEngine,
-/// NO repo DB opens), create the Job Object, and wire global + proxy routes.
+/// Build the router-mode axum app: load settings + resolve dirs (NO IndexEngine
+/// or resident per-repo DB handles; one-time background sidecar backfill may
+/// open sidecar-less DBs), create the Job Object, and wire global + proxy routes.
 ///
 /// Returns the wired `Router` plus a clone of the [`ProxyCtx`] so the caller's
 /// shutdown handler can reach the worker [`registry::Registry`] (to kill live
 /// workers on Ctrl+C). The router's own `RouterState` keeps the original; the
 /// returned clone shares the same `Arc`-backed registry + Job Object.
 pub async fn build_router_app(opts: RouterBootOptions) -> Result<(Router, ProxyCtx)> {
-    // The router does not open RocksDB, but a worker it spawns will — and the
-    // worker reads these same env-derived bounds at its own boot. Setting them
-    // here is harmless and keeps parity if the router is ever extended.
+    // The router does not retain resident RocksDB handles, but a worker it
+    // spawns will — and the worker reads these same env-derived bounds at its
+    // own boot. Setting them here is harmless and keeps parity if the router
+    // is ever extended.
     set_rocksdb_memory_bounds();
 
     let home_dir = match opts.home_dir.clone() {
@@ -162,7 +166,7 @@ pub async fn build_router_app(opts: RouterBootOptions) -> Result<(Router, ProxyC
     let mcp_proxy_ctx = state.proxy.clone();
     let enabled_tools = settings.enabled_mcp_tools.clone();
     let bind_host = opts.bind.clone();
-    let mcp_config = {
+    let mut mcp_config = {
         let is_loopback = matches!(bind_host.as_str(), "127.0.0.1" | "localhost" | "::1");
         if is_loopback {
             StreamableHttpServerConfig::default()
@@ -175,6 +179,9 @@ pub async fn build_router_app(opts: RouterBootOptions) -> Result<(Router, ProxyC
             ])
         }
     };
+    mcp_config.session_store = Some(Arc::new(
+        crate::mcp_session_store::BoundedSessionStore::new(),
+    ));
     let mcp_service = StreamableHttpService::new(
         move || {
             Ok(mcp_proxy::ProxyMcpHandler::new(

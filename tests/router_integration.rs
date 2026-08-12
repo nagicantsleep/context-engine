@@ -1,6 +1,6 @@
 //! Integration tests for ROUTER mode (process-per-project).
 //!
-//! These boot the real router axum app on an ephemeral port with a HERMETIC
+//! Most scenarios below boot the real router axum app on an ephemeral port with a HERMETIC
 //! home dir (a TempDir, so no developer settings.json is read), and exercise the
 //! parts that do NOT require a real worker subprocess:
 //! - the router serves global endpoints (`/api/config`, `/api/repos`, `/`)
@@ -10,10 +10,9 @@
 //! - a corrupt sidecar degrades to the cold placeholder (never 500);
 //! - the repo list reflects sidecar contents.
 //!
-//! A full spawn→proxy→idle-exit→respawn test needs the compiled `context-engine`
-//! binary on PATH and a real on-disk index; that is covered by the worker-side
-//! unit tests (readiness parse, single-flight election) plus the machine-local
-//! MEASURE-gate (`measure_cold_open.rs`). Here we pin the router's OWN contract.
+//! The global MCP idle-session regression additionally uses the compiled
+//! `context-engine-rs` worker to verify stale-session restoration and
+//! post-restore JSON-RPC behavior.
 
 use std::net::SocketAddr;
 
@@ -25,30 +24,47 @@ use context_engine_rs::config::{Settings, config_path, write_settings_atomic};
 use context_engine_rs::router::sidecar::{
     RepoSidecar, SIDECAR_SCHEMA, sidecar_path, write_sidecar,
 };
-use context_engine_rs::router::{RouterBootOptions, build_router_app};
+use context_engine_rs::router::{RouterBootOptions, build_router_app, proxy::ProxyCtx};
 
-/// Boot the router app on an ephemeral port with `home`/`data_dir` = the given
-/// TempDir. Returns the bound address.
+/// Boot the router app without spawning a worker subprocess.
 async fn start_router(home: &TempDir) -> SocketAddr {
+    start_router_impl(home, None).await.0
+}
+
+/// Boot the router app with the compiled worker subprocess available and retain
+/// its proxy context for deterministic worker teardown.
+async fn start_router_with_worker(home: &TempDir) -> (SocketAddr, ProxyCtx) {
+    start_router_impl(
+        home,
+        Some(std::path::PathBuf::from(env!(
+            "CARGO_BIN_EXE_context-engine-rs"
+        ))),
+    )
+    .await
+}
+
+async fn start_router_impl(
+    home: &TempDir,
+    worker_exe: Option<std::path::PathBuf>,
+) -> (SocketAddr, ProxyCtx) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
     let addr = listener.local_addr().expect("local addr");
     let home_path = home.path().to_path_buf();
-    let app = build_router_app(RouterBootOptions {
+    let (app, proxy) = build_router_app(RouterBootOptions {
         data_dir: Some(home_path.clone()),
         embeddings_dir: Some(home_path.join("embeddings")),
         bind: "127.0.0.1".to_string(),
         home_dir: Some(home_path),
-        worker_exe: None,
+        worker_exe,
     })
     .await
-    .expect("router app builds")
-    .0;
+    .expect("router app builds");
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("router serve");
     });
-    addr
+    (addr, proxy)
 }
 
 /// Seed a settings.json under `home` with the given repos.
@@ -597,4 +613,155 @@ async fn router_boot_on_empty_home_persists_machine_id() {
         reloaded.machine_id, mid,
         "persisted machine_id must be stable across reloads"
     );
+}
+
+/// The global router `/mcp` must transparently restore a session after rmcp's
+/// 300-second idle timeout, while an unknown session id remains a 404.
+#[tokio::test(start_paused = true)]
+async fn global_router_mcp_idle_session_is_restored() {
+    let home = TempDir::new().unwrap();
+    let repo_dir = home.path().join("mcp-repo");
+    std::fs::create_dir_all(&repo_dir).expect("create hermetic MCP repository");
+    std::fs::write(
+        repo_dir.join("marker.rs"),
+        b"pub fn restored_tool_call_marker() -> bool { true }\n",
+    )
+    .expect("seed hermetic MCP repository");
+    let repo = repo_dir.to_string_lossy().into_owned();
+    seed_settings(&home, &[repo.as_str()]);
+    let (addr, proxy) = start_router_with_worker(&home).await;
+    let client = Client::new();
+
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "router-restore-test", "version": "1.0.0" }
+        }
+    });
+    let normalized_repo = context_engine_rs::store::normalize_repo_path(&repo);
+    let test_result: Result<(), String> = async {
+        let response = client
+            .post(format!("http://{addr}/mcp"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-03-26")
+            .json(&initialize)
+            .send()
+            .await
+            .map_err(|error| format!("POST /mcp initialize: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "initialize should succeed, got {}",
+                response.status()
+            ));
+        }
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .ok_or_else(|| "initialize must return mcp-session-id".to_string())?
+            .to_str()
+            .map_err(|error| format!("mcp-session-id must be ASCII: {error}"))?
+            .to_owned();
+
+        // Ensure the worker has completed initialization and installed its idle
+        // timer before moving the paused clock past the timeout.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(301)).await;
+        // Poll the awakened timer and close_session task before probing the stale id.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        let restored = client
+            .get(format!("http://{addr}/mcp"))
+            .header("accept", "text/event-stream")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", &session_id)
+            .send()
+            .await
+            .map_err(|error| format!("GET stale /mcp session: {error}"))?;
+        let restored_status = restored.status();
+        if restored_status != reqwest::StatusCode::OK {
+            return Err(format!(
+                "stale session must be transparently restored (got {restored_status})"
+            ));
+        }
+        drop(restored);
+
+        // The restored session must remain usable for a global, repo-addressed
+        // JSON-RPC request, not merely for opening its SSE stream. The worker has
+        // no embedding key in this hermetic setup, so the deterministic tool-level
+        // error is acceptable; a transport/session 404 is not.
+        let tool_call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "codebase-retrieval",
+                "arguments": {
+                    "workspace_full_path": repo,
+                    "information_request": "Find the restored tool call marker"
+                }
+            }
+        });
+        let tool_response = client
+            .post(format!("http://{addr}/mcp"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", &session_id)
+            .json(&tool_call)
+            .send()
+            .await
+            .map_err(|error| format!("POST /mcp tools/call on restored session: {error}"))?;
+        let tool_status = tool_response.status();
+        let tool_body = tool_response
+            .text()
+            .await
+            .map_err(|error| format!("read tools/call response: {error}"))?;
+        let ready_repos = proxy.registry.ready_repos().await;
+        if !ready_repos.contains(&normalized_repo) {
+            return Err(format!(
+                "tools/call must reach a Ready worker for normalized repo {normalized_repo:?}; ready repos: {ready_repos:?}"
+            ));
+        }
+        if !tool_status.is_success() {
+            return Err(format!(
+                "restored-session tools/call must not be a transport error (got {tool_status}; body: {tool_body})"
+            ));
+        }
+        if !(tool_body.contains("\"result\"") || tool_body.contains("\"error\"")) {
+            return Err(format!(
+                "tools/call must return JSON-RPC/SSE result or tool-level error, got: {tool_body}"
+            ));
+        }
+
+        let unknown = client
+            .get(format!("http://{addr}/mcp"))
+            .header("accept", "text/event-stream")
+            .header("mcp-protocol-version", "2025-03-26")
+            .header("mcp-session-id", "never-seen-session-id")
+            .send()
+            .await
+            .map_err(|error| format!("GET unknown /mcp session: {error}"))?;
+        let unknown_status = unknown.status();
+        if unknown_status != reqwest::StatusCode::NOT_FOUND {
+            return Err(format!(
+                "unknown session must remain 404 (got {unknown_status})"
+            ));
+        }
+        Ok(())
+    }
+    .await;
+
+    proxy.registry.kill_all().await;
+    if let Err(error) = test_result {
+        panic!("{error}");
+    }
 }

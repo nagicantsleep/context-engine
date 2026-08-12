@@ -15,7 +15,28 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: Test (native Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install libclang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev
+
+      - name: Run tests
+        run: cargo test --locked
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -29,7 +50,7 @@ jobs:
             npm-pkg: vibervn-context-engine-linux-arm64
             bin: context-engine-rs
           - target: aarch64-apple-darwin
-            runner: macos-latest
+            runner: macos-14
             npm-pkg: vibervn-context-engine-darwin-arm64
             bin: context-engine-rs
           - target: x86_64-pc-windows-msvc
@@ -70,6 +91,16 @@ jobs:
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
         shell: pwsh
+
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm
+        shell: bash
+
+      - name: Set LIBCLANG_PATH (macOS)
+        if: runner.os == 'macOS'
+        run: echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+        shell: bash
 
       - name: Build binary
         run: cargo build --release --locked --target ${{ matrix.target }}

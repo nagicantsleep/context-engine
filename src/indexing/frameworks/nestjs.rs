@@ -33,14 +33,12 @@ impl FrameworkResolver for NestJsResolver {
 
     fn detect(&self, ctx: &DetectionContext) -> bool {
         for file in ctx.file_set.iter() {
-            if file.ends_with("package.json") && !file.contains("node_modules") {
-                if let Some(content) = (ctx.read_file)(file) {
-                    if content.contains("\"@nestjs/core\"")
-                        || content.contains("\"@nestjs/common\"")
-                    {
-                        return true;
-                    }
-                }
+            if file.ends_with("package.json")
+                && !file.contains("node_modules")
+                && let Some(content) = (ctx.read_file)(file)
+                && (content.contains("\"@nestjs/core\"") || content.contains("\"@nestjs/common\""))
+            {
+                return true;
             }
         }
         false

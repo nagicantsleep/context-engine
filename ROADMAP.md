@@ -37,8 +37,10 @@
 - **Status:** `[x] done`
 
 ### 2.2 Multi-repo namespace
-- **Mục tiêu:** Cross-repo symbol navigation — thêm `repo_id` vào symbol FQN và calls table
-- **Ghi chú:** Hiện tại mỗi repo là SurrealDB instance độc lập; cần schema design trước
+- **Mục tiêu:** Cross-repo symbol navigation through the existing absolute-path FQNs; resolve symbols across all loaded repository databases without changing the FQN format.
+- **Hành vi:** Cross-repo edges materialize lazily after both repositories are indexed and the calling repository is re-indexed.
+- **Schema:** Version v8 is a diagnostic bump marking cross-repo awareness; no DDL or FQN migration is required.
+- **Quyết định:** [`docs/decisions/0002-multi-repo-namespace.md`](docs/decisions/0002-multi-repo-namespace.md)
 - **Status:** `[x] done`
 
 ---

@@ -29,6 +29,29 @@ npm install -g vibervn-context-engine@latest
 vibervn-context-engine --port 6699
 ```
 
+### Runtime model and data paths
+
+The default router listens on `127.0.0.1:6699`. A worker-free smoke check is:
+
+```bash
+curl http://127.0.0.1:6699/api/config
+```
+
+Action requests (such as indexing, queries, and MCP tool calls) select a
+repository and spawn an on-demand worker for it. Read-only detail routes such
+as index stats, graph, files, and status use sidecars or cold state and do not
+spawn a worker. The global `/mcp` endpoint exposes both MCP tools; each call
+selects its repository with the absolute `workspace_full_path` argument.
+
+Fresh settings enable only `codebase-retrieval`. `file-retrieval` is listed but
+requires explicit enablement in the UI/settings, reflected by the current
+configuration.
+
+With the default data directory, repository data is stored at
+`<data_dir>/rocksdb/<name>` for generation 0 and
+`<data_dir>/rocksdb/<generation>/<name>` for generation >=1. Router-readable
+sidecars are stored under `<data_dir>/sidecar/`.
+
 Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
 
 ## Features

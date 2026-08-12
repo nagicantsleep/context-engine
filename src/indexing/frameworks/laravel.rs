@@ -39,14 +39,12 @@ impl FrameworkResolver for LaravelResolver {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            if fname == "composer.json" {
-                if let Some(content) = (ctx.read_file)(file) {
-                    if content.contains("\"laravel/framework\"")
-                        || content.contains("\"laravel/laravel\"")
-                    {
-                        return true;
-                    }
-                }
+            if fname == "composer.json"
+                && let Some(content) = (ctx.read_file)(file)
+                && (content.contains("\"laravel/framework\"")
+                    || content.contains("\"laravel/laravel\""))
+            {
+                return true;
             }
             if fname == "artisan" {
                 return true;

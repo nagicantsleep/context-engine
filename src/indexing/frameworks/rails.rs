@@ -54,12 +54,11 @@ impl FrameworkResolver for RailsResolver {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            if fname == "Gemfile" {
-                if let Some(content) = (ctx.read_file)(file) {
-                    if content.contains("gem 'rails'") || content.contains("gem \"rails\"") {
-                        return true;
-                    }
-                }
+            if fname == "Gemfile"
+                && let Some(content) = (ctx.read_file)(file)
+                && (content.contains("gem 'rails'") || content.contains("gem \"rails\""))
+            {
+                return true;
             }
             if file.ends_with("config/routes.rb") {
                 return true;

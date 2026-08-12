@@ -338,6 +338,17 @@ struct RawEdgeRow {
     #[serde(default)]
     flow_type: Option<String>,
 }
+type ResolvedEdgeRow = (
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    Option<f32>,
+    Option<String>,
+);
 
 /// Resolve a page of raw edges into the edge accumulator.
 ///
@@ -350,17 +361,7 @@ struct RawEdgeRow {
 async fn resolve_raw_edge_page(
     dbs: &[Surreal<Db>],
     batch: &[RawEdgeRow],
-    edge_batch: &mut Vec<(
-        String,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        Option<f32>,
-        Option<String>,
-    )>,
+    edge_batch: &mut Vec<ResolvedEdgeRow>,
     label: &str,
 ) -> Result<()> {
     // Short-circuit: taint sentinel edges bypass symbol resolution
@@ -2438,6 +2439,39 @@ impl IndexPipeline {
         prefer_non_generated(&mut candidates.iter())
     }
 
+    /// Take a non-blocking snapshot of all open repo DBs. The caller's `db` is
+    /// always first (index 0) — flush_edge_batch always uses dbs[0].
+    /// IMPORTANT: the read-lock is acquired, all handles are cloned, then the
+    /// lock is dropped before returning — never hold the lock across an .await.
+    async fn collect_db_snapshot(&self, primary: &Surreal<Db>) -> Vec<Surreal<Db>> {
+        let mut snapshot = vec![primary.clone()];
+        if let Some(repo_dbs) = &self.repo_dbs {
+            let map = repo_dbs.read().await;
+            for db in map.values() {
+                snapshot.push(db.clone());
+            }
+            // map (read guard) is dropped here before any subsequent .await
+        }
+        // Deduplicate: the primary DB may also be in repo_dbs.
+        // Since Surreal<Db> doesn't implement Eq, dedup by pointer identity is
+        // not straightforward — just keep all (duplicate queries are idempotent).
+        snapshot
+    }
+
+    /// Snapshot loaded DBs other than this pipeline's owning repo. Repository
+    /// keys, unlike Surreal handles, are comparable, so this avoids processing the
+    /// primary DB twice while dropping the shared-map lock before any DB await.
+    async fn collect_foreign_db_snapshot(&self) -> Vec<Surreal<Db>> {
+        let Some(repo_dbs) = &self.repo_dbs else {
+            return Vec::new();
+        };
+        let own_repo = crate::store::normalize_repo_path(&self.repo);
+        let map = repo_dbs.read().await;
+        map.iter()
+            .filter(|(repo, _)| crate::store::normalize_repo_path(repo) != own_repo)
+            .map(|(_, db)| db.clone())
+            .collect()
+    }
     /// Resolve raw edges (stored in `raw_edge` table) into denormalized `calls` rows.
     ///
     /// Algorithm (two-pass, bounded-memory):
@@ -2495,43 +2529,6 @@ impl IndexPipeline {
     /// SurrealDB 2.6.5 (145 s for 34 pages) because the function-call predicate cannot
     /// use any index.  The compound `from_file > $last_file` branch is what enables
     /// the index seek and achieves O(N) total.
-    ///
-    /// Writes the `edges_resolved` marker in `index_meta` only after all pages commit.
-
-    /// Take a non-blocking snapshot of all open repo DBs. The caller's `db` is
-    /// always first (index 0) — flush_edge_batch always uses dbs[0].
-    /// IMPORTANT: the read-lock is acquired, all handles are cloned, then the
-    /// lock is dropped before returning — never hold the lock across an .await.
-    async fn collect_db_snapshot(&self, primary: &Surreal<Db>) -> Vec<Surreal<Db>> {
-        let mut snapshot = vec![primary.clone()];
-        if let Some(repo_dbs) = &self.repo_dbs {
-            let map = repo_dbs.read().await;
-            for db in map.values() {
-                snapshot.push(db.clone());
-            }
-            // map (read guard) is dropped here before any subsequent .await
-        }
-        // Deduplicate: the primary DB may also be in repo_dbs.
-        // Since Surreal<Db> doesn't implement Eq, dedup by pointer identity is
-        // not straightforward — just keep all (duplicate queries are idempotent).
-        snapshot
-    }
-
-    /// Snapshot loaded DBs other than this pipeline's owning repo. Repository
-    /// keys, unlike Surreal handles, are comparable, so this avoids processing the
-    /// primary DB twice while dropping the shared-map lock before any DB await.
-    async fn collect_foreign_db_snapshot(&self) -> Vec<Surreal<Db>> {
-        let Some(repo_dbs) = &self.repo_dbs else {
-            return Vec::new();
-        };
-        let own_repo = crate::store::normalize_repo_path(&self.repo);
-        let map = repo_dbs.read().await;
-        map.iter()
-            .filter(|(repo, _)| crate::store::normalize_repo_path(repo) != own_repo)
-            .map(|(_, db)| db.clone())
-            .collect()
-    }
-
     async fn resolve_edges_phase2(
         &self,
         db: &Surreal<Db>,
@@ -2641,17 +2638,7 @@ impl IndexPipeline {
 
         let t_load_start = Instant::now();
         let mut last_file = String::new();
-        let mut edge_batch: Vec<(
-            String,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            Option<f32>,
-            Option<String>,
-        )> = Vec::new();
+        let mut edge_batch: Vec<ResolvedEdgeRow> = Vec::new();
         let mut pages_processed: u64 = 0;
         let mut scan_ms_total: u64 = 0;
         // Throttled progress: count raw_edge rows scanned (numerator over `total`).
@@ -2948,17 +2935,7 @@ impl IndexPipeline {
 
         // Resolve all RAM-buffered raw_edges in one pass (no DB scan needed).
         let t_resolve = Instant::now();
-        let mut edge_batch: Vec<(
-            String,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            Option<f32>,
-            Option<String>,
-        )> = Vec::new();
+        let mut edge_batch: Vec<ResolvedEdgeRow> = Vec::new();
         let mut relate_write_ms: u64 = 0;
         let mut edges_written: u64 = 0;
 
@@ -3314,17 +3291,7 @@ impl IndexPipeline {
         let reresolve_start = Instant::now();
         let page_size: i64 = WRITE_BATCH_SIZE as i64;
         let mut cursor = String::new();
-        let mut edge_batch: Vec<(
-            String,
-            String,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            Option<f32>,
-            Option<String>,
-        )> = Vec::new();
+        let mut edge_batch: Vec<ResolvedEdgeRow> = Vec::new();
 
         loop {
             let batch: Vec<RawEdgeRow> = db
@@ -3634,17 +3601,7 @@ fn strip_id_brackets_phase2(id: &str) -> String {
 fn resolve_raw_edge_page_from_map(
     name_bucket: &HashMap<String, Vec<SymbolWithPos>>,
     batch: &[RawEdgeRow],
-    edge_batch: &mut Vec<(
-        String,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        Option<f32>,
-        Option<String>,
-    )>,
+    edge_batch: &mut Vec<ResolvedEdgeRow>,
     label: &str,
 ) {
     for row in batch {
@@ -4367,20 +4324,7 @@ async fn flush_raw_edge_batch_native(db: &Surreal<Db>, edges: &[RawEdgeRecord]) 
 ///   The prior approach (`RELATE symbol:⟨fqn⟩->calls->symbol:⟨fqn⟩ SET ...`) built a
 ///   multi-statement text query that SurrealDB had to parse for each row.  At 138K edges
 ///   this parsing overhead dominated (~14s vs ~7s minimum for the raw KV writes).
-async fn flush_edge_batch(
-    db: &Surreal<Db>,
-    batch: &[(
-        String,
-        String,
-        i64,
-        String,
-        String,
-        String,
-        String,
-        Option<f32>,
-        Option<String>,
-    )],
-) -> Result<()> {
+async fn flush_edge_batch(db: &Surreal<Db>, batch: &[ResolvedEdgeRow]) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }

@@ -42,11 +42,12 @@
 //!
 //! ## Multi-client safety
 //!
-//! Session ids are globally unique (rmcp's `session_id()`), so every client —
-//! and every concurrent connection — has an independent entry. A single shared
-//! store instance backs both the global `/mcp` endpoint and the per-repo
-//! services; there is no cross-client interference. All state lives behind a
-//! single `RwLock`, so concurrent `load`/`store`/`delete` are serialized.
+//! Session ids are globally unique, so each client/connection has an
+//! independent entry within the store it uses. Store ownership is determined
+//! by service wiring: router-global `/mcp` gets a fresh store, while the
+//! worker-side global and per-repo services share the worker `AppState` store.
+//! All entries in a given store live behind one `RwLock`, so concurrent
+//! `load`/`store`/`delete` operations for that store are serialized.
 
 use std::collections::HashMap;
 use std::sync::Arc;

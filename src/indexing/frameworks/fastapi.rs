@@ -30,23 +30,21 @@ impl FrameworkResolver for FastApiResolver {
 
     fn detect(&self, ctx: &DetectionContext) -> bool {
         for file in ctx.file_set.iter() {
-            if file.ends_with(".py") {
-                if let Some(content) = (ctx.read_file)(file) {
-                    if content.contains("from fastapi") || content.contains("import fastapi") {
-                        return true;
-                    }
-                }
+            if file.ends_with(".py")
+                && let Some(content) = (ctx.read_file)(file)
+                && (content.contains("from fastapi") || content.contains("import fastapi"))
+            {
+                return true;
             }
             let fname = std::path::Path::new(file)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            if fname == "requirements.txt" || fname == "pyproject.toml" {
-                if let Some(content) = (ctx.read_file)(file) {
-                    if content.contains("fastapi") {
-                        return true;
-                    }
-                }
+            if (fname == "requirements.txt" || fname == "pyproject.toml")
+                && let Some(content) = (ctx.read_file)(file)
+                && content.contains("fastapi")
+            {
+                return true;
             }
         }
         false
