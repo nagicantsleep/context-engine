@@ -36,6 +36,11 @@ struct Cli {
     /// Worker idle window before scale-to-zero. Ignored in router mode.
     #[arg(long, env = "CONTEXT_ENGINE_WORKER_IDLE_SECS")]
     worker_idle_secs: Option<u64>,
+
+    /// Base URL of the owning router (set by the router at spawn). Enables
+    /// cross-repo BFS expansion via `/api/cross-repo/chunk` callbacks.
+    #[arg(long, hide = true, env = "CONTEXT_ENGINE_ROUTER_URL")]
+    router_url: Option<String>,
 }
 
 #[tokio::main]

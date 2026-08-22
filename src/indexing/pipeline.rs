@@ -363,6 +363,9 @@ async fn resolve_raw_edge_page(
     batch: &[RawEdgeRow],
     edge_batch: &mut Vec<ResolvedEdgeRow>,
     label: &str,
+    // Name-keyed candidates from OTHER repos' symbol sidecars (worker mode).
+    // Empty in tests/standalone runs without a data_dir.
+    foreign_sidecars: &HashMap<String, Vec<SymbolWithPos>>,
 ) -> Result<()> {
     // Short-circuit: taint sentinel edges bypass symbol resolution
     let taint_rows: Vec<_> = batch
@@ -402,6 +405,17 @@ async fn resolve_raw_edge_page(
     let mut name_bucket: HashMap<String, Vec<SymbolWithPos>> = HashMap::new();
     for s in sym_rows {
         name_bucket.entry(s.name.clone()).or_default().push(s);
+    }
+    // Cross-repo (worker mode): foreign repos contribute SIDECAR candidates
+    // only. Appended before the single deterministic sort, so precedence is
+    // positional (file/lines) — identical to live-foreign-DB behavior.
+    for name in &to_names {
+        if let Some(candidates) = foreign_sidecars.get(name) {
+            name_bucket
+                .entry(name.clone())
+                .or_default()
+                .extend(candidates.iter().cloned());
+        }
     }
     for bucket in name_bucket.values_mut() {
         bucket.sort_unstable_by(|a, b| {
@@ -1424,6 +1438,9 @@ impl IndexPipeline {
                 .await;
             return Err(e);
         }
+        // Symbol sidecar refresh LAST — it must describe the now-durable state
+        // (changed chunks/edges + identity marker all committed above).
+        self.refresh_symbol_sidecar_incremental(db, &to_process, &to_delete).await;
 
         Ok((run_stats, vi_apply_ms))
     }
@@ -2565,11 +2582,11 @@ impl IndexPipeline {
             set_meta(db, EDGES_RESOLVED_KEY, "1")
                 .await
                 .context("phase2: set edges_resolved marker (empty)")?;
+            // Zero raw edges ≠ zero symbols: a library repo still must
+            // publish its table so other repos can resolve INTO it.
+            self.publish_symbol_sidecar_from_db(db).await;
             return Ok(p2);
         }
-
-        // Load ALL symbols into memory at once for O(1) per-edge lookup.
-        // This avoids per-page round-trips to the DB for symbol resolution.
         // Memory: 27K symbols × ~120 bytes = ~3.3 MB — bounded and safe.
         let t_sym_load = Instant::now();
         let all_symbols = load_all_symbols_multi(&self.collect_db_snapshot(db).await)
@@ -2578,10 +2595,19 @@ impl IndexPipeline {
         p2.sym_load_ms = t_sym_load.elapsed().as_millis() as u64;
         info!(repo = %self.repo, symbol_count = all_symbols.len(), sym_load_ms = p2.sym_load_ms, "phase2: loaded all symbols");
 
+        // Cross-repo (worker mode): foreign candidates come from SYMBOL
+        // SIDECARS (no open foreign DB handles here); live entries win.
+        let mut merged_symbols = all_symbols;
+        if let Some(data_dir) = &self.data_dir {
+            merge_foreign_sidecars_into(&mut merged_symbols, data_dir, &self.repo);
+        }
+        // Publish own table so other processes' Phase 2 can resolve into us.
+        self.publish_symbol_sidecar(&merged_symbols);
+
         // Build a name → Vec<SymbolWithPos> lookup map for O(1) resolution.
         let t_bucket = Instant::now();
         let mut name_bucket: HashMap<String, Vec<SymbolWithPos>> = HashMap::new();
-        for s in all_symbols.into_values() {
+        for s in merged_symbols.into_values() {
             name_bucket.entry(s.name.clone()).or_default().push(s);
         }
         // Pre-sort each bucket for deterministic tie-breaking (file, line_start, line_end).
@@ -2835,6 +2861,175 @@ impl IndexPipeline {
     /// To avoid silent data loss, `run()` detects this state
     /// (`raw_edge_count=0 AND file_meta non-empty AND edges_resolved absent`)
     /// and forces a full rebuild.
+
+    /// Publish this repo's symbol table to
+    /// `<data_dir>/sidecar/<name>.symbols.json` (best-effort).
+    ///
+    /// This is the lock-free channel other processes' Phase 2 uses to resolve
+    /// raw edges INTO this repo: a worker can never open another live worker's
+    /// RocksDB (exclusive per-directory LOCK), but every worker can read the
+    /// shared sidecar dir. Called on the full-rebuild paths right where the
+    /// merged symbol map already exists — no extra DB scan. Foreign entries in
+    /// the map (standalone mode) are filtered out; a repo only publishes its
+    /// OWN symbols.
+    fn publish_symbol_sidecar(&self, symbols_by_fqn: &HashMap<String, SymbolWithPos>) {
+        let Some(data_dir) = &self.data_dir else {
+            return;
+        };
+        let repo_norm = crate::store::normalize_repo_path(&self.repo);
+        let own: Vec<SymbolWithPos> = symbols_by_fqn
+            .values()
+            .filter(|s| crate::path_in_repo(&s.file, &repo_norm))
+            .cloned()
+            .collect();
+        match crate::router::sidecar::write_symbol_sidecar(data_dir, &repo_norm, own) {
+            Ok(()) => info!(repo = %self.repo, "symbol sidecar published"),
+            Err(e) => warn!(
+                repo = %self.repo,
+                error = %e,
+                "symbol sidecar publish failed; cross-repo resolution into this repo stays stale until the next successful run"
+            ),
+        }
+    }
+
+    /// Incremental symbol-sidecar refresh: drop changed/deleted files from the
+    /// prior table, re-read those files' current symbols, and rewrite.
+    ///
+    /// A missing prior sidecar falls back to ONE full own-DB scan (first
+    /// incremental after this feature ships, or after a manual delete) — after
+    /// that, refreshes cost O(changed files). Best-effort like [`Self::publish_symbol_sidecar`].
+
+    /// Best-effort write of an already-collected symbol table.
+    fn write_sidecar_table(&self, own: Vec<SymbolWithPos>) {
+        let Some(data_dir) = &self.data_dir else {
+            return;
+        };
+        let repo_norm = crate::store::normalize_repo_path(&self.repo);
+        match crate::router::sidecar::write_symbol_sidecar(data_dir, &repo_norm, own) {
+            Ok(()) => info!(repo = %self.repo, "symbol sidecar published"),
+            Err(e) => warn!(
+                repo = %self.repo,
+                error = %e,
+                "symbol sidecar publish failed; cross-repo resolution into this repo stays stale until the next successful run"
+            ),
+        }
+    }
+
+    /// Publish this repo's CURRENT symbol table straight from its DB.
+    ///
+    /// Used by the ZERO-raw-edge Phase 2 fast paths: a repo with symbols but
+    /// no outgoing calls (a library!) skips the normal publish site below,
+    /// yet OTHER repos still need its table to resolve edges INTO it.
+    async fn publish_symbol_sidecar_from_db(&self, db: &Surreal<Db>) {
+        if self.data_dir.is_none() {
+            return;
+        }
+        let repo_norm = crate::store::normalize_repo_path(&self.repo);
+        let own: Vec<SymbolWithPos> = load_all_symbols(db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| crate::path_in_repo(&s.file, &repo_norm))
+            .collect();
+        self.write_sidecar_table(own);
+    }
+
+    async fn refresh_symbol_sidecar_incremental(
+        &self,
+        db: &Surreal<Db>,
+        changed_files: &[String],
+        deleted_files: &[String],
+    ) {
+        let Some(data_dir) = &self.data_dir else {
+            return;
+        };
+        if changed_files.is_empty() && deleted_files.is_empty() {
+            return;
+        }
+        let repo_norm = crate::store::normalize_repo_path(&self.repo);
+
+        let mut by_fqn: HashMap<String, SymbolWithPos> =
+            match crate::router::sidecar::read_symbol_sidecar(data_dir, &repo_norm) {
+                Some(payload) => payload
+                    .symbols
+                    .into_iter()
+                    .map(|e| {
+                        (
+                            e.fqn.clone(),
+                            SymbolWithPos {
+                                fqn: e.fqn,
+                                file: e.file,
+                                name: e.name,
+                                line_start: e.line_start,
+                                line_end: e.line_end,
+                            },
+                        )
+                    })
+                    .collect(),
+                None => load_all_symbols(db)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|s| crate::path_in_repo(&s.file, &repo_norm))
+                    .map(|s| (s.fqn.clone(), s))
+                    .collect(),
+            };
+
+        for file in deleted_files.iter().chain(changed_files.iter()) {
+            by_fqn.retain(|_, s| s.file != *file);
+        }
+        if !changed_files.is_empty()
+            && let Ok(rows) = load_symbols_for_files(db, changed_files).await
+        {
+            for s in rows {
+                by_fqn.insert(s.fqn.clone(), s);
+            }
+        }
+
+        let table: Vec<SymbolWithPos> = by_fqn.into_values().collect();
+        match crate::router::sidecar::write_symbol_sidecar(data_dir, &repo_norm, table) {
+            Ok(()) => info!(
+                repo = %self.repo,
+                changed = changed_files.len(),
+                deleted = deleted_files.len(),
+                "symbol sidecar refreshed incrementally"
+            ),
+            Err(e) => warn!(repo = %self.repo, error = %e, "incremental symbol sidecar write failed"),
+        }
+    }
+
+    /// Name-keyed candidate bucket built once per run from EVERY other repo's
+    /// published symbol sidecar. Consumed by the page-scan resolution paths
+    /// (`resolve_raw_edge_page`) where live foreign DBs may not exist.
+    fn build_foreign_sidecar_bucket(&self) -> HashMap<String, Vec<SymbolWithPos>> {
+        let mut bucket: HashMap<String, Vec<SymbolWithPos>> = HashMap::new();
+        let Some(data_dir) = &self.data_dir else {
+            return bucket;
+        };
+        for payload in crate::router::sidecar::load_foreign_symbol_sidecars(data_dir, &self.repo) {
+            for e in payload.symbols {
+                bucket
+                    .entry(e.name.clone())
+                    .or_default()
+                    .push(SymbolWithPos {
+                        fqn: e.fqn,
+                        file: e.file,
+                        name: e.name,
+                        line_start: e.line_start,
+                        line_end: e.line_end,
+                    });
+            }
+        }
+        for candidates in bucket.values_mut() {
+            candidates.sort_unstable_by(|a, b| {
+                a.file
+                    .cmp(&b.file)
+                    .then(a.line_start.cmp(&b.line_start))
+                    .then(a.line_end.cmp(&b.line_end))
+            });
+        }
+        bucket
+    }
     async fn resolve_edges_from_ram(
         &self,
         db: &Surreal<Db>,
@@ -2856,6 +3051,9 @@ impl IndexPipeline {
             set_meta(db, EDGES_RESOLVED_KEY, "1")
                 .await
                 .context("phase2(ram): set edges_resolved marker (empty)")?;
+            // Same as the DB-scan empty path above: publish even with no
+            // outgoing edges.
+            self.publish_symbol_sidecar_from_db(db).await;
             return Ok(p2);
         }
 
@@ -2866,7 +3064,7 @@ impl IndexPipeline {
         // reproducing `load_all_symbols`' result EXACTLY. When absent (overflow),
         // fall back to the DB reload — today's behavior, output-identical.
         let t_sym_load = Instant::now();
-        let all_symbols: Vec<SymbolWithPos> = match ram_symbols {
+        let mut merged_map: HashMap<String, SymbolWithPos> = match ram_symbols {
             Some(buf) => {
                 let n = buf.len();
                 let mut merged = buf;
@@ -2885,24 +3083,32 @@ impl IndexPipeline {
                         merged.entry(k).or_insert(v); // RAM buffer wins
                     }
                 }
-                let total = merged.len();
-                let v: Vec<SymbolWithPos> = merged.into_values().collect();
-                // sym_load is ~0 here — the symbols never left RAM.
                 p2.sym_load_ms = t_sym_load.elapsed().as_millis() as u64;
-                info!(repo = %self.repo, symbol_count = n, cross_repo_total = total, sym_load_ms = p2.sym_load_ms, "phase2(ram): reused in-RAM symbol buffer (no DB reload)");
-                v
+                info!(repo = %self.repo, symbol_count = n, sym_load_ms = p2.sym_load_ms, "phase2(ram): reused in-RAM symbol buffer (no DB reload)");
+                merged
             }
             None => {
                 let v = load_all_symbols_multi(&self.collect_db_snapshot(db).await)
                     .await
                     .context("phase2(ram): load all symbols")?;
                 let symbol_count = v.len();
-                let v: Vec<SymbolWithPos> = v.into_values().collect();
                 p2.sym_load_ms = t_sym_load.elapsed().as_millis() as u64;
                 info!(repo = %self.repo, symbol_count = symbol_count, sym_load_ms = p2.sym_load_ms, "phase2(ram): loaded all symbols from DB (buffer overflowed)");
                 v
             }
         };
+
+        // Cross-repo (worker mode): foreign repos have no open DB handles here,
+        // so their candidate symbols come from their published SYMBOL SIDECARS.
+        // Live-DB entries (own + standalone-mode foreign) always win — sidecars
+        // only fill names that no open DB provides.
+        if let Some(data_dir) = &self.data_dir {
+            merge_foreign_sidecars_into(&mut merged_map, data_dir, &self.repo);
+        }
+        // Publish THIS repo's table so other workers can resolve into us.
+        self.publish_symbol_sidecar(&merged_map);
+
+        let all_symbols: Vec<SymbolWithPos> = merged_map.into_values().collect();
 
         // Build name → Vec<SymbolWithPos> map for O(1) resolution.
         let t_bucket = Instant::now();
@@ -3293,6 +3499,9 @@ impl IndexPipeline {
         let mut cursor = String::new();
         let mut edge_batch: Vec<ResolvedEdgeRow> = Vec::new();
 
+        // Built ONCE per run — reading every foreign sidecar per PAGE would
+        // multiply JSON parse cost by the page count.
+        let foreign_sidecars = self.build_foreign_sidecar_bucket();
         loop {
             let batch: Vec<RawEdgeRow> = db
                 .query(
@@ -3323,6 +3532,7 @@ impl IndexPipeline {
                 &batch,
                 &mut edge_batch,
                 "incremental phase2",
+                &foreign_sidecars,
             )
             .await?;
 
@@ -3596,6 +3806,62 @@ fn strip_id_brackets_phase2(id: &str) -> String {
         .to_string()
 }
 
+
+/// Merge foreign repos' SYMBOL SIDECAR entries into an existing fqn-keyed map.
+/// Existing keys win — live-DB symbols always outrank sidecar copies.
+fn merge_foreign_sidecars_into(
+    map: &mut HashMap<String, SymbolWithPos>,
+    data_dir: &std::path::Path,
+    own_repo: &str,
+) {
+    let before = map.len();
+    for payload in crate::router::sidecar::load_foreign_symbol_sidecars(data_dir, own_repo) {
+        for e in payload.symbols {
+            map.entry(e.fqn.clone()).or_insert(SymbolWithPos {
+                fqn: e.fqn,
+                file: e.file,
+                name: e.name,
+                line_start: e.line_start,
+                line_end: e.line_end,
+            });
+        }
+    }
+    let added = map.len() - before;
+    if added > 0 {
+        debug!(foreign_added = added, "phase2: merged foreign symbol sidecars");
+    }
+}
+
+/// Load current symbols of `files` (targeted indexed query — O(files)).
+async fn load_symbols_for_files(
+    db: &Surreal<Db>,
+    files: &[String],
+) -> Result<Vec<SymbolWithPos>> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        fqn: String,
+        file: String,
+        name: String,
+        line_start: i64,
+        line_end: i64,
+    }
+    let rows: Vec<Row> = db
+        .query("SELECT meta::id(id) AS fqn, file, name, line_start, line_end FROM symbol WHERE file IN $files")
+        .bind(("files", files.to_vec()))
+        .await
+        .context("load_symbols_for_files")?
+        .take(0)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| SymbolWithPos {
+            fqn: strip_id_brackets_phase2(&r.fqn),
+            file: r.file,
+            name: r.name,
+            line_start: r.line_start,
+            line_end: r.line_end,
+        })
+        .collect())
+}
 /// Resolve a page of raw edges using a pre-built in-memory symbol map.
 /// This avoids per-page DB round-trips for symbol lookup.
 fn resolve_raw_edge_page_from_map(
@@ -9346,6 +9612,90 @@ mod reviewed_edge_regressions {
                 out == fallback_target && fqn == &format!("{fallback_target}::foo")
             }),
             "caller-owned edge was not refreshed: {refreshed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_repo_resolution_uses_foreign_symbol_sidecar_without_live_db() {
+        // WORKER-MODE shape: repo B has NO open DB handle here — its symbols
+        // are reachable only through the published SYMBOL SIDECAR. Phase 2 of
+        // repo A must still materialize the caller-owned edge into B.
+        let home = TempDir::new().unwrap();
+        let repo_a = "/repo/a";
+        let repo_b = "/repo/b";
+        let db_a = open_db(home.path(), repo_a, 0).await.unwrap();
+        let caller_file = "/repo/a/caller.rs";
+
+        crate::router::sidecar::write_symbol_sidecar(
+            home.path(),
+            repo_b,
+            vec![SymbolWithPos {
+                fqn: format!("{repo_b}/z.rs::foo"),
+                file: format!("{repo_b}/z.rs"),
+                name: "foo".to_string(),
+                line_start: 1,
+                line_end: 2,
+            }],
+        )
+        .unwrap();
+        insert_test_raw_edge(&db_a, caller_file, "a", "foo").await;
+
+        // NOTE: repo_dbs contains ONLY repo A (one handle per process), and
+        // data_dir is set so Phase 2 can read the shared sidecar dir.
+        let pipeline =
+            IndexPipeline::new(repo_a.to_string(), None).with_data_dir(home.path().to_path_buf());
+        pipeline
+            .resolve_edges_phase2(&db_a, None, None)
+            .await
+            .unwrap();
+
+        let calls = test_calls(&db_a).await;
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(
+            calls[0].1, format!("{repo_b}/z.rs"),
+            "edge must resolve to the SIDE CAR-provided foreign candidate"
+        );
+        assert_eq!(calls[0].3, format!("{repo_b}/z.rs::foo"));
+    }
+
+    #[tokio::test]
+    async fn incremental_sidecar_refresh_drops_deleted_files() {
+        let home = TempDir::new().unwrap();
+        let repo = "/repo/incr";
+        let db = open_db(home.path(), repo, 0).await.unwrap();
+        let gone = format!("{repo}/gone.rs");
+        insert_test_symbol(&db, &gone, "foo").await;
+
+        let pipeline =
+            IndexPipeline::new(repo.to_string(), None).with_data_dir(home.path().to_path_buf());
+
+        // Phase 1: no prior sidecar → full own-DB fallback load, then publish.
+        // `changed` is non-empty so the refresh actually runs (an empty delta
+        // short-circuits by design — nothing to update).
+        pipeline
+            .refresh_symbol_sidecar_incremental(&db, &[gone.clone()], &[])
+            .await;
+        assert!(
+            crate::router::sidecar::read_symbol_sidecar(home.path(), repo)
+                .expect("sidecar written")
+                .symbols
+                .iter()
+                .any(|s| s.file == gone),
+            "initial refresh must publish the existing symbol"
+        );
+
+        // Simulate deletion of that file: delta refresh must drop its entries.
+        db.query("DELETE FROM symbol WHERE file = $file")
+            .bind(("file", gone.clone()))
+            .await
+            .unwrap();
+        pipeline
+            .refresh_symbol_sidecar_incremental(&db, &[], &[gone.clone()])
+            .await;
+        let refreshed = crate::router::sidecar::read_symbol_sidecar(home.path(), repo).unwrap();
+        assert!(
+            refreshed.symbols.iter().all(|s| s.file != gone),
+            "deleted file must vanish from the published table"
         );
     }
 

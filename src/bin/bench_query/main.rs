@@ -282,6 +282,7 @@ async fn run() -> i32 {
         cli.rerank,
         QueryGraphMode::Full,
         Duration::from_secs(settings_snapshot.mcp_index_wait_secs),
+        None, // standalone CLI: every endpoint is local
     )
     .await
     {

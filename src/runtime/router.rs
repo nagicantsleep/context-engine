@@ -11,19 +11,28 @@ pub async fn run(cli: &Cli, bind: &str) {
     let addr: std::net::SocketAddr = format!("{bind}:{port}").parse().unwrap_or_else(|error| {
         exit_with_error(&format!("invalid bind address '{bind}:{port}': {error}"), 2)
     });
+    // Bind FIRST so workers spawned later know the callback URL. Workers are
+    // same-host by construction, so they always target 127.0.0.1:<port> even
+    // when the router binds a wider interface.
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|error| exit_with_error(&format!("could not bind to {addr}: {error}"), 2));
+    let bound_port = listener
+        .local_addr()
+        .unwrap_or_else(|error| exit_with_error(&format!("could not read local_addr: {error}"), 2))
+        .port();
+
     let (app, proxy) = router::build_router_app(router::RouterBootOptions {
         data_dir: cli.data_dir.clone(),
         embeddings_dir: cli.embeddings_dir.clone(),
         bind: bind.to_owned(),
         home_dir: cli.home_dir.clone(),
         worker_exe: None,
+        router_url: Some(format!("http://127.0.0.1:{bound_port}")),
     })
     .await
     .unwrap_or_else(|error| exit_with_error(&format!("{error:#}"), 2));
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|error| exit_with_error(&format!("could not bind to {addr}: {error}"), 2));
     info!("Context Engine router listening on http://{addr}");
 
     let server = axum::serve(listener, app).into_future();

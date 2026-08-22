@@ -52,7 +52,22 @@ With the default data directory, repository data is stored at
 `<data_dir>/rocksdb/<generation>/<name>` for generation >=1. Router-readable
 sidecars are stored under `<data_dir>/sidecar/`.
 
+
+### Cross-repo navigation (router mode)
+
+Call-graph edges may cross repository boundaries. Indexing repo A resolves
+call targets against repo B's published symbol table
+(`<data_dir>/sidecar/<name>.symbols.json`), so cross-repo edges materialize in
+A's index after both repos are indexed and A is re-indexed (lazy, per
+[decision 0002](docs/decisions/0002-multi-repo-namespace.md)). At query time,
+BFS expansion fetches foreign chunk content on demand: the calling worker asks
+the router, which proxies to repo B's worker (`/api/cross-repo/chunk` →
+`/api/graph-chunk`). A cold callee repo pays one bounded worker spawn; if the
+callee is unreachable, that expansion subtree is dropped (never fabricated).
+Standalone (single-process) mode keeps the original in-process resolution.
+
 Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
+
 
 ## Features
 

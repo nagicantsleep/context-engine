@@ -53,7 +53,6 @@ pub struct RouterBootOptions {
     pub data_dir: Option<PathBuf>,
     pub embeddings_dir: Option<PathBuf>,
     pub bind: String,
-    /// Override for the home directory (settings.json location). `None` uses the
     /// real `dirs::home_dir()` (production). Tests inject a TempDir so the router
     /// reads a hermetic settings.json instead of the developer's real config —
     /// the same explicit-home-dir pattern `build_router` / `boot_engine` use.
@@ -64,6 +63,10 @@ pub struct RouterBootOptions {
     /// because the test harness's own `current_exe()` is the test binary, not
     /// the context-engine binary.
     pub worker_exe: Option<PathBuf>,
+    /// Base URL workers use to call back into this router for cross-repo chunk
+    /// fetches (`http://127.0.0.1:<port>`). `None` disables worker-side
+    /// cross-repo expansion (tests that never spawn workers).
+    pub router_url: Option<String>,
 }
 
 /// Router-mode shared state. Deliberately small: the proxy context (client +
@@ -256,4 +259,5 @@ include!("repo_action_handlers.rs");
 include!("host_resource_handlers.rs");
 include!("aggregate_handlers.rs");
 include!("sidecar_backfill.rs");
+include!("cross_repo_handlers.rs");
 include!("routes.rs");

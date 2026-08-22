@@ -33,7 +33,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::store::sanitize_repo_name;
+use crate::store::ops::SymbolWithPos;
+use crate::store::{normalize_repo_path, sanitize_repo_name};
 
 /// Light, fixed-shape per-repo metadata for cold (no-worker) display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +165,136 @@ pub fn read_aux_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice::<T>(&bytes).ok()
 }
 
+// ── Symbol-table sidecar (cross-repo Phase 2 resolution) ─────────────────────
+//
+// The per-repo SYMBOL TABLE as a sibling aux sidecar
+// (`<sanitized>.symbols.json`). A process-per-project WORKER holds exactly one
+// RocksDB handle (its own repo) — RocksDB takes an exclusive per-directory
+// lock, so a worker can NEVER open another live worker's DB to look up symbols
+// during cross-repo Phase 2 edge resolution. This sidecar is the lock-free
+// channel: after a successful index run the owning worker publishes its full
+// `(fqn, file, name, line_start, line_end)` table here, and every other
+// worker's Phase 2 reads these files to resolve raw edges into foreign repos.
+//
+// Precedence at resolution time: own DB > live foreign DBs (standalone mode)
+// > symbol sidecars. Entries mirror `store::ops::SymbolWithPos` so conversion
+// is field-for-field.
+
+/// Current symbol-sidecar shape version.
+pub const SYMBOLS_SIDECAR_SCHEMA: u32 = 1;
+
+/// One exported symbol: exactly the fields Phase 2 needs for deterministic
+/// candidate tie-breaking (`select_best_candidate` sorts by file/line range)
+/// and RELATE endpoints (`fqn`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolSidecarEntry {
+    pub fqn: String,
+    pub file: String,
+    pub name: String,
+    pub line_start: i64,
+    pub line_end: i64,
+}
+
+/// Full symbol table payload for one repo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolSidecar {
+    /// Shape version — a mismatching value makes readers treat the file as
+    /// absent (cross-repo resolution silently skips that repo).
+    pub schema: u32,
+    /// Normalized repo path the entries belong to (readers skip their OWN
+    /// repo's sidecar; live-DB symbols always win over sidecar copies).
+    pub repo: String,
+    /// RFC3339 publish timestamp (diagnostics only).
+    pub indexed_at: String,
+    /// Number of entries (redundant with `symbols.len()` but lets a reader
+    /// sanity-check before materializing the vec).
+    pub count: u64,
+    pub symbols: Vec<SymbolSidecarEntry>,
+}
+
+/// Write a repo's symbol-table sidecar atomically (same tempfile+fsync+rename
+/// pattern as every other sidecar). Best-effort at the call site: a failure
+/// must not fail an index run — it only disables cross-repo resolution INTO
+/// this repo until the next successful publish.
+pub fn write_symbol_sidecar(
+    data_dir: &Path,
+    repo: &str,
+    mut symbols: Vec<SymbolWithPos>,
+) -> Result<()> {
+    // Deterministic order keeps diffs readable and gives readers a stable
+    // iteration order regardless of DB scan order.
+    symbols.sort_unstable_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.line_start.cmp(&b.line_start))
+            .then(a.line_end.cmp(&b.line_end))
+            .then(a.fqn.cmp(&b.fqn))
+    });
+    let payload = SymbolSidecar {
+        schema: SYMBOLS_SIDECAR_SCHEMA,
+        repo: normalize_repo_path(repo),
+        indexed_at: chrono::Utc::now().to_rfc3339(),
+        count: symbols.len() as u64,
+        symbols: symbols
+            .into_iter()
+            .map(|s| SymbolSidecarEntry {
+                fqn: s.fqn,
+                file: s.file,
+                name: s.name,
+                line_start: s.line_start,
+                line_end: s.line_end,
+            })
+            .collect(),
+    };
+    write_aux_json(data_dir, repo, "symbols", &payload)
+}
+
+/// Read one repo's symbol sidecar. `None` when absent/corrupt/wrong-schema —
+/// cross-repo resolution degrades to "that repo contributes no candidates".
+pub fn read_symbol_sidecar(data_dir: &Path, repo: &str) -> Option<SymbolSidecar> {
+    let payload: SymbolSidecar = read_aux_json(data_dir, repo, "symbols")?;
+    if payload.schema != SYMBOLS_SIDECAR_SCHEMA {
+        return None;
+    }
+    Some(payload)
+}
+
+/// Load EVERY other repo's symbol sidecar from the shared sidecar dir. Used by
+/// Phase 2 in worker mode where foreign repos have no open DB handles. Skips
+/// the caller's own repo (`own_repo`) — live local symbols always win.
+pub fn load_foreign_symbol_sidecars(data_dir: &Path, own_repo: &str) -> Vec<SymbolSidecar> {
+    let dir = sidecar_dir(data_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let own = normalize_repo_path(own_repo);
+    let suffix = format!(".{SYMBOLS_AUX_KIND}.json");
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(&suffix) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_slice::<SymbolSidecar>(&bytes) else {
+            continue; // corrupt/old shape → skip that repo silently
+        };
+        if payload.schema != SYMBOLS_SIDECAR_SCHEMA || payload.repo == own {
+            continue;
+        }
+        out.push(payload);
+    }
+    out
+}
+
+const SYMBOLS_AUX_KIND: &str = "symbols";
+
+
 /// Remove ALL of a repo's sidecar files (meta + graph + files). Called on repo /
 /// index removal so the router's cold view doesn't keep serving stale data for a
 /// repo whose index was just deleted. Best-effort: a file that isn't there (or
@@ -172,6 +303,9 @@ pub fn remove_all_sidecars(data_dir: &Path, repo: &str) {
     let _ = std::fs::remove_file(sidecar_path(data_dir, repo));
     let _ = std::fs::remove_file(aux_path(data_dir, repo, "graph"));
     let _ = std::fs::remove_file(aux_path(data_dir, repo, "files"));
+    // Symbol table (cross-repo Phase 2 source) must die with the index so a
+    // deleted repo never resolves fresh edges against stale symbols.
+    let _ = std::fs::remove_file(aux_path(data_dir, repo, SYMBOLS_AUX_KIND));
 }
 
 #[cfg(test)]
@@ -232,6 +366,78 @@ mod tests {
         assert!(
             read_sidecar(dir.path(), repo).is_none(),
             "unknown schema must read as None so an old shape is never mis-read"
+        );
+    }
+
+    fn sym(fqn: &str, file: &str, name: &str, ls: i64, le: i64) -> SymbolWithPos {
+        SymbolWithPos {
+            fqn: fqn.to_string(),
+            file: file.to_string(),
+            name: name.to_string(),
+            line_start: ls,
+            line_end: le,
+        }
+    }
+
+    #[test]
+    fn symbol_sidecar_roundtrip_and_sort() {
+        let dir = TempDir::new().unwrap();
+        let repo = "/repo/writer";
+        write_symbol_sidecar(
+            dir.path(),
+            repo,
+            vec![
+                sym("/repo/writer/z.rs::zed", "/repo/writer/z.rs", "zed", 1, 5),
+                sym("/repo/writer/a.rs::alpha", "/repo/writer/a.rs", "alpha", 10, 20),
+                sym("/repo/writer/a.rs::beta", "/repo/writer/a.rs", "beta", 1, 5),
+            ],
+        )
+        .unwrap();
+        let got = read_symbol_sidecar(dir.path(), repo).expect("symbol sidecar reads back");
+        assert_eq!(got.schema, SYMBOLS_SIDECAR_SCHEMA);
+        assert_eq!(got.repo, repo);
+        assert_eq!(got.count, 3);
+        assert_eq!(got.symbols.len(), 3);
+        // Sorted by (file, line_start, line_end, fqn).
+        assert_eq!(got.symbols[0].name, "beta");
+        assert_eq!(got.symbols[1].name, "alpha");
+        assert_eq!(got.symbols[2].name, "zed");
+    }
+
+    #[test]
+    fn foreign_loader_skips_own_and_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let own = "/repo/self";
+        write_symbol_sidecar(dir.path(), own, vec![sym("/repo/self/a.rs::a", "/repo/self/a.rs", "a", 1, 2)])
+            .unwrap();
+        write_symbol_sidecar(
+            dir.path(),
+            "/repo/other",
+            vec![sym("/repo/other/b.rs::b", "/repo/other/b.rs", "b", 3, 4)],
+        )
+        .unwrap();
+        // Corrupt a third repo's payload — loader must skip it silently.
+        std::fs::write(aux_path(dir.path(), "/repo/broken", SYMBOLS_AUX_KIND), b"{nope").unwrap();
+
+        let mut loaded = load_foreign_symbol_sidecars(dir.path(), own);
+        assert_eq!(loaded.len(), 1, "own repo and corrupt payloads are skipped");
+        assert_eq!(loaded.pop().unwrap().repo, "/repo/other");
+
+        // Missing dir entirely → empty, never an error.
+        assert!(load_foreign_symbol_sidecars(TempDir::new().unwrap().path(), own).is_empty());
+    }
+
+    #[test]
+    fn remove_all_clears_symbols_payload() {
+        let dir = TempDir::new().unwrap();
+        let repo = "/repo/gone";
+        write_symbol_sidecar(dir.path(), repo, vec![sym(format!("{repo}/a.rs::a").as_str(), format!("{repo}/a.rs").as_str(), "a", 1, 2)])
+            .unwrap();
+        assert!(read_symbol_sidecar(dir.path(), repo).is_some());
+        remove_all_sidecars(dir.path(), repo);
+        assert!(
+            read_symbol_sidecar(dir.path(), repo).is_none(),
+            "index removal must drop the symbol table so no stale cross-repo resolution survives"
         );
     }
 }

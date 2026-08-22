@@ -46,7 +46,7 @@ pub async fn run(cli: &Cli, bind: &str, repo: String) {
         .unwrap_or(settings.read().await.worker_idle_secs);
     let idle = router::worker::IdleTracker::new(Duration::from_secs(idle_secs));
 
-    let app = server::build_router(
+    let app = server::build_router_with_scope(
         home_dir.clone(),
         data_dir,
         embeddings_dir,
@@ -54,6 +54,14 @@ pub async fn run(cli: &Cli, bind: &str, repo: String) {
         repo_dbs.clone(),
         settings.clone(),
         bind,
+        // Cross-repo BFS expansion (router callback) + strict single-repo
+        // ownership scope. Without --router-url the worker still serves its
+        // own repo; only foreign-repo expansion is disabled.
+        cli
+            .router_url
+            .as_deref()
+            .map(|url| context_engine_rs::query::cross_repo::CrossRepoResolver::new(url.to_owned())),
+        Some(context_engine_rs::store::normalize_repo_path(&repo)),
     );
     let app = router::worker::with_idle_tracking(app, idle.clone());
     let app = router::worker::with_config_reload(

@@ -68,6 +68,26 @@ Tradeoffs:
 ## Follow-Up
 
 - Document the lazy-materialization behavior in `AGENTS.md` or `docs/product/README.md`
-  so users know to re-index after adding a new repo.
+  so users know to re-index after adding a new repo. → **Done 2026-08-22:**
+  documented in README ("Cross-repo navigation (router mode)") and ROADMAP 2.2.
 - If multi-machine use is ever needed, revisit Option A (FQN prefix) — it will require a
   breaking migration.
+
+## Amendment — Router Mode Implementation (2026-08-22)
+
+The original decision assumed all repos' DBs are open in one process. The
+default deployment is now process-per-project (router + one worker per repo),
+where RocksDB's exclusive per-directory LOCK makes cross-worker DB opens
+impossible. Cross-repo support was completed WITHOUT changing this decision:
+Option B semantics (absolute-path FQNs, lazy materialization, caller-owned
+edges, query-time scatter-gather) are preserved; only the transport changed:
+
+- Index-time resolution reads foreign repos' published symbol tables from
+  `<data_dir>/sidecar/` (lock-free) instead of open foreign DB handles;
+  precedence own DB > live foreign DBs > sidecars is unchanged in effect.
+- Query-time content for foreign endpoints is fetched through the router to
+  the owning worker; unavailability drops that expansion subtree, mirroring
+  the existing missing-endpoint behavior.
+
+Details: `docs/plans/active/cross-repo-router-mode.md`, README "Cross-repo
+navigation (router mode)".

@@ -58,6 +58,9 @@ async fn start_router_impl(
         bind: "127.0.0.1".to_string(),
         home_dir: Some(home_path),
         worker_exe,
+        // Tests bind AFTER build_router_app; workers spawned by these tests
+        // don't need cross-repo callbacks, so the URL stays disabled.
+        router_url: None,
     })
     .await
     .expect("router app builds");
@@ -764,4 +767,67 @@ async fn global_router_mcp_idle_session_is_restored() {
     if let Err(error) = test_result {
         panic!("{error}");
     }
+}
+
+// ─── Cross-repo chunk proxy ──────────────────────────────────────────────
+
+/// Unknown owner → the router answers 404 natively WITHOUT spawning any
+/// worker (the ownership check precedes `acquire_and_proxy`).
+#[tokio::test]
+async fn cross_repo_chunk_unknown_owner_is_native_404() {
+    let home = TempDir::new().unwrap();
+    seed_settings(&home, &[]);
+    let addr = start_router(&home).await;
+    let resp = Client::new()
+        .get(format!("http://{addr}/api/cross-repo/chunk"))
+        .query(&[("fqn", "/nope/a.rs::a"), ("file", "/nope/a.rs")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no configured repository owns"),
+        "{body}"
+    );
+}
+
+/// Owned repo → the router resolves it, spawns that repo's worker, and
+/// proxies `/api/graph-chunk`. The worker scope gate must accept its OWN repo
+/// and the (empty) index lookup yields the WORKER's 404 — proving the request
+/// crossed router → worker instead of being answered by the router itself.
+#[tokio::test]
+async fn cross_repo_chunk_owned_repo_proxies_to_owning_worker() {
+    let home = TempDir::new().unwrap();
+    let repo_dir = home.path().join("owned");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::write(repo_dir.join("a.rs"), b"pub fn a() {}\n").unwrap();
+    let repo = repo_dir.to_string_lossy().to_string();
+    seed_settings(&home, &[repo.as_str()]);
+    let (addr, proxy) = start_router_with_worker(&home).await;
+
+    let resp = Client::new()
+        .get(format!("http://{addr}/api/cross-repo/chunk"))
+        .query(&[
+            ("fqn", format!("{repo}/a.rs::a")),
+            ("file", format!("{repo}/a.rs")),
+        ])
+        .timeout(std::time::Duration::from_secs(40))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"].as_str(),
+        Some("symbol or overlapping chunk not found"),
+        "must be the WORKER's 404 (proxy reached the owning worker), got {body}"
+    );
+
+    // Deterministic teardown: don't wait out the worker's 300s idle window.
+    proxy.registry.kill_all().await;
 }

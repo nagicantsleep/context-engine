@@ -516,6 +516,10 @@ async fn run_tool(
                 &deps.settings,
                 req,
                 repo,
+                // Chat agent runs inside one worker/monolith process; the
+                // cross-repo resolver is threaded only through the primary
+                // query funnels (documented limitation).
+                None,
             )
             .await;
             let ok = !out.starts_with("Error:");

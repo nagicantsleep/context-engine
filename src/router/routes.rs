@@ -16,6 +16,7 @@ fn build_http_routes() -> Router<RouterState> {
         .route("/api/index-all", post(post_index_all))
         .route("/api/index-status", get(get_index_status))
         .route("/api/query", post(proxy_query_by_body))
+        .route("/api/cross-repo/chunk", get(cross_repo_chunk))
         .route("/api/mcp-tool", post(proxy_mcp_tool_by_body))
         .route(
             "/api/mcp-tool/file-retrieval",

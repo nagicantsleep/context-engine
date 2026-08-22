@@ -317,6 +317,8 @@ pub struct McpHandler {
     index_engine: Arc<IndexEngine>,
     repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     settings: Arc<RwLock<crate::config::Settings>>,
+    /// Router-backed cross-repo resolver (worker mode; `None` standalone).
+    cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
     // Required by the #[tool_router] macro; suppress the dead_code lint.
     #[allow(dead_code)]
     tool_router: ToolRouter<McpHandler>,
@@ -331,6 +333,7 @@ impl McpHandler {
         repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
         settings: Arc<RwLock<crate::config::Settings>>,
         enabled_tools: &[String],
+        cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
     ) -> Self {
         let all_tools: &[&str] = &["codebase-retrieval", "file-retrieval"];
         let mut router = Self::tool_router();
@@ -345,6 +348,7 @@ impl McpHandler {
             index_engine,
             repo_dbs,
             settings,
+            cross_repo,
             tool_router: router,
         }
     }
@@ -372,6 +376,7 @@ impl McpHandler {
             &settings,
             &augmented_query,
             &args.workspace_full_path,
+            self.cross_repo.as_ref(),
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -435,6 +440,8 @@ pub struct RepoMcpHandler {
     index_engine: Arc<IndexEngine>,
     repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     settings: Arc<RwLock<crate::config::Settings>>,
+    /// Router-backed cross-repo resolver (worker mode; `None` standalone).
+    cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
     #[allow(dead_code)]
     tool_router: ToolRouter<RepoMcpHandler>,
 }
@@ -449,6 +456,7 @@ impl RepoMcpHandler {
         repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
         settings: Arc<RwLock<crate::config::Settings>>,
         enabled_tools: &[String],
+        cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
     ) -> Self {
         let all_tools: &[&str] = &["codebase-retrieval", "file-retrieval"];
         let mut router = Self::tool_router();
@@ -464,6 +472,7 @@ impl RepoMcpHandler {
             index_engine,
             repo_dbs,
             settings,
+            cross_repo,
             tool_router: router,
         }
     }
@@ -483,6 +492,7 @@ impl RepoMcpHandler {
             &settings,
             &args.information_request,
             &self.repo_path,
+            self.cross_repo.as_ref(),
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -571,6 +581,7 @@ pub async fn run_codebase_retrieval(
     settings: &Settings,
     information_request: &str,
     workspace_full_path: &str,
+    cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
 ) -> String {
     // 1. Validate workspace_full_path.
     let repo = workspace_full_path.trim();
@@ -657,6 +668,7 @@ pub async fn run_codebase_retrieval(
         repo,
         query_graph_mode,
         query_warm_wait,
+        cross,
     )
     .await;
     format!("{output_prefix}{output}")
@@ -758,6 +770,7 @@ async fn do_query(
     repo: &str,
     graph_mode: QueryGraphMode,
     warm_wait: Duration,
+    cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
 ) -> String {
     let voyage_client = match VoyageClient::new_for_provider(
         crate::embedding::voyage::Provider::parse(&settings.embedding.provider),
@@ -788,6 +801,7 @@ async fn do_query(
         settings.llm.agentic_rag_grep_read,
         None,
         graph_mode,
+        cross,
     )
     .await
     {

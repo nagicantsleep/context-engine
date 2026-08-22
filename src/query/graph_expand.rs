@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -6,8 +7,11 @@ use surrealdb::Surreal;
 use surrealdb::engine::local::Db;
 use tracing::warn;
 
+use crate::path_in_repo;
+use crate::query::cross_repo::{CrossRepoResolver, RemoteChunkData};
 use crate::query::find_db_for_file;
 use crate::query::merger::MergeChunk;
+
 
 /// An expanded chunk produced by BFS graph traversal.
 pub struct ExpandedChunk {
@@ -52,6 +56,11 @@ const CALLEE_SCORE_FACTOR: f32 = 0.5;
 const SCORE_FLOOR: f32 = 0.15;
 const MAX_DEPTH: usize = 2;
 const MAX_BONUS_CHUNKS: usize = 30;
+/// Upper bound on cross-repo router callbacks per `graph_expand` call. The
+/// BFS frontier is already bounded (≤20 endpoints per node, depth 2); this cap
+/// additionally bounds the LATENCY a query can pay for foreign-repo content
+/// (each fetch is a bounded HTTP round-trip, possibly a cold worker spawn).
+const MAX_CROSS_REPO_FETCHES: usize = 24;
 
 /// Expand base search results via BFS over the call graph.
 ///
@@ -61,10 +70,14 @@ const MAX_BONUS_CHUNKS: usize = 30;
 ///
 /// `schema_version`: when >= 2, uses indexed `WHERE out_name=$name` queries.
 /// When < 2 (migration in progress), falls back to the old link-deref query.
+///
+/// `cross`: router-backed resolver for endpoints living in OTHER repos
+/// (worker mode). `None` keeps the pure-local behavior (standalone/monolith).
 pub async fn graph_expand(
     base_chunks: &[MergeChunk],
     db_map: &HashMap<String, Surreal<Db>>,
     schema_version: u32,
+    cross: Option<&CrossRepoResolver>,
 ) -> Vec<ExpandedChunk> {
     if db_map.is_empty() {
         return vec![];
@@ -79,12 +92,14 @@ pub async fn graph_expand(
     let mut queue_max: usize = 0; // max queue length observed
     let mut callers_queries: u64 = 0; // # of query_callers calls
     let mut callees_queries: u64 = 0; // # of query_callees calls
-    let mut fetch_calls: u64 = 0; // # of fetch_chunk_for_fqn calls
-
+    let mut fetch_calls: u64 = 0; // # of fetch_endpoint_chunk calls
     let mut all_expanded: Vec<ExpandedChunk> = Vec::new();
     let mut expanded_index: HashMap<String, usize> = HashMap::new();
     let mut best_result_score: HashMap<String, f32> = HashMap::new();
     let mut best_state_score: HashMap<(String, usize), f32> = HashMap::new();
+    // Remaining cross-repo router callbacks for THIS expansion (see
+    // MAX_CROSS_REPO_FETCHES). BFS is sequential, so plain load/store suffices.
+    let cross_fetch_budget = AtomicUsize::new(MAX_CROSS_REPO_FETCHES);
 
     let base_keys: HashSet<(String, u32, u32)> = base_chunks
         .iter()
@@ -163,14 +178,18 @@ pub async fn graph_expand(
                     {
                         continue;
                     }
-                    let Some(endpoint_db) = find_db_for_file(db_map, &caller_file) else {
-                        continue;
-                    };
                     fetch_calls += 1;
-                    if let Some(chunk) =
-                        fetch_chunk_for_fqn(endpoint_db, &caller_fqn, caller_score, &base_keys)
-                            .await
-                    {
+                    let chunk = fetch_endpoint_chunk(
+                        db_map,
+                        &caller_file,
+                        &caller_fqn,
+                        caller_score,
+                        &base_keys,
+                        cross,
+                        &cross_fetch_budget,
+                    )
+                    .await;
+                    if let Some(chunk) = chunk {
                         // Preserve the result cap: once full, an unseen endpoint
                         // cannot be returned or improve an existing result, so do not
                         // broaden traversal through it. Existing endpoints may still be
@@ -217,14 +236,18 @@ pub async fn graph_expand(
                     {
                         continue;
                     }
-                    let Some(endpoint_db) = find_db_for_file(db_map, &callee_file) else {
-                        continue;
-                    };
                     fetch_calls += 1;
-                    if let Some(chunk) =
-                        fetch_chunk_for_fqn(endpoint_db, &callee_fqn, callee_score, &base_keys)
-                            .await
-                    {
+                    let chunk = fetch_endpoint_chunk(
+                        db_map,
+                        &callee_file,
+                        &callee_fqn,
+                        callee_score,
+                        &base_keys,
+                        cross,
+                        &cross_fetch_budget,
+                    )
+                    .await;
+                    if let Some(chunk) = chunk {
                         // Preserve the result cap: once full, an unseen endpoint
                         // cannot be returned or improve an existing result, so do not
                         // broaden traversal through it. Existing endpoints may still be
@@ -437,25 +460,26 @@ fn merge_endpoint_confidence(
         .or_insert(confidence);
 }
 
-async fn fetch_chunk_for_fqn(
+/// Fetch the symbol + overlapping chunk rows for `fqn` from one local DB.
+///
+/// Resolve by full record id (the symbol id IS the FQN). This avoids the old
+/// `rfind("::")` split, which mis-derived file_prefix for methods/namespaced
+/// symbols (e.g. "x.cpp::Foo::bar" → file "x.cpp::Foo", matching no file) and
+/// silently dropped every method-target expansion.
+///
+/// Direct record fetch via `FROM $thing` — NOT `FROM symbol WHERE id = $thing`.
+/// SurrealDB 2.6.5 does NOT optimize `WHERE id = $thing` into a primary-key lookup:
+/// EXPLAIN shows "Iterate Table (FULL TABLE SCAN)" and a timed exec measured 14044 ms
+/// to return 1 row on the 2.63M-row kernel symbol table. Binding the Thing as the FROM
+/// target is a direct record fetch (0.137 ms — ~100,000× faster) and returns the
+/// identical row. Same correct pattern as `fetch_symbol_kind` in engine.rs.
+pub(crate) async fn fetch_symbol_chunk_data(
     db: &Surreal<Db>,
     fqn: &str,
-    score: f32,
-    base_keys: &HashSet<(String, u32, u32)>,
-) -> Option<ExpandedChunk> {
-    // Resolve by full record id (the symbol id IS the FQN). This avoids the old
-    // `rfind("::")` split, which mis-derived file_prefix for methods/namespaced
-    // symbols (e.g. "x.cpp::Foo::bar" → file "x.cpp::Foo", matching no file) and
-    // silently dropped every method-target expansion.
+) -> Option<RemoteChunkData> {
     let thing =
         surrealdb::sql::Thing::from(("symbol", surrealdb::sql::Id::String(fqn.to_string())));
 
-    // Direct record fetch via `FROM $thing` — NOT `FROM symbol WHERE id = $thing`.
-    // SurrealDB 2.6.5 does NOT optimize `WHERE id = $thing` into a primary-key lookup:
-    // EXPLAIN shows "Iterate Table (FULL TABLE SCAN)" and a timed exec measured 14044 ms
-    // to return 1 row on the 2.63M-row kernel symbol table. Binding the Thing as the FROM
-    // target is a direct record fetch (0.137 ms — ~100,000× faster) and returns the
-    // identical row. Same correct pattern as `fetch_symbol_kind` in engine.rs.
     let sym_rows: Vec<SymbolRow> = db
         .query(
             "SELECT meta::id(id) AS fqn, file, name, line_start, line_end, kind FROM $thing LIMIT 1",
@@ -483,22 +507,88 @@ async fn fetch_chunk_for_fqn(
         .ok()?;
 
     let row = chunk_rows.into_iter().next()?;
-    let ls = row.line_start as u32;
-    let le = row.line_end as u32;
-
-    if base_keys.contains(&(row.file.clone(), ls, le)) {
-        return None;
-    }
-
-    Some(ExpandedChunk {
+    Some(RemoteChunkData {
         file: row.file,
-        line_start: ls,
-        line_end: le,
-        score,
+        line_start: row.line_start as u32,
+        line_end: row.line_end as u32,
         content: row.content,
         symbol: Some(sym.name),
         symbol_fqn: Some(strip_id_brackets(&sym.fqn)),
         symbol_kind: sym.kind,
+    })
+}
+
+async fn fetch_chunk_for_fqn(
+    db: &Surreal<Db>,
+    fqn: &str,
+    score: f32,
+    base_keys: &HashSet<(String, u32, u32)>,
+) -> Option<ExpandedChunk> {
+    let data = fetch_symbol_chunk_data(db, fqn).await?;
+    if base_keys.contains(&(data.file.clone(), data.line_start, data.line_end)) {
+        return None;
+    }
+    Some(ExpandedChunk {
+        file: data.file,
+        line_start: data.line_start,
+        line_end: data.line_end,
+        score,
+        content: data.content,
+        symbol: data.symbol,
+        symbol_fqn: data.symbol_fqn,
+        symbol_kind: data.symbol_kind,
+    })
+}
+
+/// Fetch one BFS endpoint's chunk: LOCAL DB when this process owns the
+/// endpoint's repo, otherwise (worker mode) a router callback into the owning
+/// worker via [`CrossRepoResolver`].
+///
+/// Ownership uses a STRICT repo-prefix match — no first-DB fallback — because
+/// with a resolver configured, a fallback hit would silently query the WRONG
+/// repo's DB for a foreign FQN. When NO resolver is configured
+/// (standalone/monolith), the legacy `find_db_for_file` fallback is preserved
+/// so existing single-DB edge cases keep working unchanged.
+///
+/// A failed callback returns `None`: the endpoint (and its subtree) is dropped,
+/// exactly like today's missing-endpoint behavior. No fabricated row is ever
+/// emitted.
+async fn fetch_endpoint_chunk(
+    db_map: &HashMap<String, Surreal<Db>>,
+    endpoint_file: &str,
+    fqn: &str,
+    score: f32,
+    base_keys: &HashSet<(String, u32, u32)>,
+    cross: Option<&CrossRepoResolver>,
+    cross_budget: &AtomicUsize,
+) -> Option<ExpandedChunk> {
+    if let Some((_, db)) = db_map.iter().find(|(repo, _)| path_in_repo(endpoint_file, repo)) {
+        return fetch_chunk_for_fqn(db, fqn, score, base_keys).await;
+    }
+    let Some(resolver) = cross else {
+        let db = find_db_for_file(db_map, endpoint_file)?;
+        return fetch_chunk_for_fqn(db, fqn, score, base_keys).await;
+    };
+    // Bound total remote round-trips per expansion (latency guard).
+    let remaining = cross_budget.load(Ordering::Relaxed);
+    if remaining == 0 {
+        return None;
+    }
+    cross_budget.store(remaining - 1, Ordering::Relaxed);
+
+    let remote = resolver.fetch_chunk(fqn, endpoint_file).await?;
+    if base_keys.contains(&(remote.file.clone(), remote.line_start, remote.line_end)) {
+        return None;
+    }
+    Some(ExpandedChunk {
+        file: remote.file,
+        line_start: remote.line_start,
+        line_end: remote.line_end,
+        score,
+        content: remote.content,
+        symbol: remote.symbol,
+        symbol_fqn: remote.symbol_fqn,
+        symbol_kind: remote.symbol_kind,
     })
 }
 
@@ -672,7 +762,7 @@ mod tests {
         db_map.insert("/test/bfs_confidence".to_string(), db);
 
         // schema_version=2: uses the fast indexed path for callers/callees.
-        let expanded = graph_expand(&[seed_chunk], &db_map, 2).await;
+        let expanded = graph_expand(&[seed_chunk], &db_map, 2, None).await;
 
         let a_score = expanded.iter().find(|c| c.file == "/a.rs").map(|c| c.score);
         let b_score = expanded.iter().find(|c| c.file == "/b.rs").map(|c| c.score);
@@ -742,7 +832,7 @@ mod tests {
             symbol_kind: None,
         };
         let db_map = HashMap::from([("/repo/a".to_string(), db_a), ("/repo/b".to_string(), db_b)]);
-        let expanded = graph_expand(&[base], &db_map, 2).await;
+        let expanded = graph_expand(&[base], &db_map, 2, None).await;
         assert!(
             expanded
                 .iter()
@@ -787,7 +877,7 @@ mod tests {
             symbol_kind: None,
         };
         let db_map = HashMap::from([("/repo/weighted".to_string(), db)]);
-        let mut result: Vec<_> = graph_expand(&[base], &db_map, 2)
+        let mut result: Vec<_> = graph_expand(&[base], &db_map, 2, None)
             .await
             .into_iter()
             .map(|c| (c.file, c.score))
@@ -826,13 +916,124 @@ mod tests {
             })
             .collect();
         let db_map = HashMap::from([("/repo/best_path".to_string(), db)]);
-        let mut targets: Vec<_> = graph_expand(&bases, &db_map, 2)
+        let mut targets: Vec<_> = graph_expand(&bases, &db_map, 2, None)
             .await
             .into_iter()
             .filter(|chunk| chunk.symbol_fqn.as_deref() == Some(target_fqn))
             .collect();
         assert_eq!(targets.len(), 1, "duplicate endpoint must be returned once");
+
         targets.pop().unwrap()
+    }
+    // ── Cross-repo router-callback expansion ─────────────────────────────
+
+    async fn stub_router_serving_repo_b() -> String {
+        use axum::routing::get;
+        use axum::{Json, Router};
+        let app = Router::new().route(
+            "/api/cross-repo/chunk",
+            get(|| async {
+                Json(RemoteChunkData {
+                    file: "/repo/b/b.rs".to_string(),
+                    line_start: 1,
+                    line_end: 5,
+                    content: "fn b() {}".to_string(),
+                    symbol: Some("b".to_string()),
+                    symbol_fqn: Some("/repo/b/b.rs::b".to_string()),
+                    symbol_kind: Some("function".to_string()),
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    async fn seed_caller_with_foreign_edge(home: &TempDir) -> HashMap<String, surrealdb::Surreal<surrealdb::engine::local::Db>> {
+        let db_a = open_db(home.path(), "/repo/a", 0).await.unwrap();
+        insert_symbol(&db_a, "/repo/a/a.rs::a", "/repo/a/a.rs", "a", 1, 5).await;
+        insert_call(
+            &db_a,
+            "/repo/a/a.rs::a",
+            "/repo/a/a.rs",
+            "/repo/b/b.rs::b",
+            "/repo/b/b.rs",
+            None,
+        )
+        .await;
+        HashMap::from([("/repo/a".to_string(), db_a)])
+    }
+
+    #[tokio::test]
+    async fn foreign_endpoint_content_is_fetched_via_router_callback() {
+        let home = TempDir::new().unwrap();
+        let base = stub_router_serving_repo_b().await;
+        let resolver = CrossRepoResolver::new(base);
+        let db_map = seed_caller_with_foreign_edge(&home).await;
+        let base_chunk = MergeChunk {
+            file: "/repo/a/a.rs".into(),
+            line_start: 1,
+            line_end: 5,
+            score: 1.0,
+            content: "fn a() {}".into(),
+            symbol: None,
+            symbol_fqn: None,
+            symbol_kind: None,
+        };
+        // db_map holds ONLY repo A — the /repo/b endpoint is reachable only
+        // through the resolver.
+        let expanded = graph_expand(&[base_chunk], &db_map, 2, Some(&resolver)).await;
+        let hit = expanded
+            .iter()
+            .find(|c| c.file == "/repo/b/b.rs")
+            .expect("foreign callee must be expanded via the router callback");
+        assert_eq!(hit.content, "fn b() {}");
+        assert_eq!(hit.symbol_fqn.as_deref(), Some("/repo/b/b.rs::b"));
+        assert!((hit.score - 0.5).abs() < f32::EPSILON, "callee factor × extracted weight");
+    }
+
+    #[tokio::test]
+    async fn failed_cross_repo_callback_drops_the_subtree() {
+        let home = TempDir::new().unwrap();
+        // Port 1 is unroutable — every fetch fails fast.
+        let resolver = CrossRepoResolver::new("http://127.0.0.1:1".to_string());
+        let db_map = seed_caller_with_foreign_edge(&home).await;
+        let base_chunk = MergeChunk {
+            file: "/repo/a/a.rs".into(),
+            line_start: 1,
+            line_end: 5,
+            score: 1.0,
+            content: "fn a() {}".into(),
+            symbol: None,
+            symbol_fqn: None,
+            symbol_kind: None,
+        };
+        let expanded = graph_expand(&[base_chunk], &db_map, 2, Some(&resolver)).await;
+        assert!(
+            expanded.iter().all(|c| c.file != "/repo/b/b.rs"),
+            "callback failure must drop the foreign subtree, never fabricate a row"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_resolver_foreign_endpoint_behaves_as_before() {
+        let home = TempDir::new().unwrap();
+        let db_map = seed_caller_with_foreign_edge(&home).await;
+        let base_chunk = MergeChunk {
+            file: "/repo/a/a.rs".into(),
+            line_start: 1,
+            line_end: 5,
+            score: 1.0,
+            content: "fn a() {}".into(),
+            symbol: None,
+            symbol_fqn: None,
+            symbol_kind: None,
+        };
+        // cross=None (standalone/legacy): foreign endpoint unreachable → same
+        // drop behavior that existed before the resolver existed.
+        let expanded = graph_expand(&[base_chunk], &db_map, 2, None).await;
+        assert!(expanded.iter().all(|c| c.file != "/repo/b/b.rs"));
     }
 
     #[tokio::test]

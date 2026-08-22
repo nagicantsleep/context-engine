@@ -1,4 +1,5 @@
 pub mod content_fence;
+pub mod cross_repo;
 pub mod engine;
 pub mod filters;
 pub mod graph_expand;

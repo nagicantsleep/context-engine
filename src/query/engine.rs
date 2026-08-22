@@ -184,6 +184,7 @@ pub async fn run_query_with_filters(
         agentic_rag_grep_read,
         external_filters,
         QueryGraphMode::Full,
+        None,
     )
     .await
 }
@@ -205,6 +206,9 @@ pub(crate) async fn run_query_with_filters_and_mode(
     agentic_rag_grep_read: bool,
     external_filters: Option<crate::query::filters::QueryFilters>,
     graph_mode: QueryGraphMode,
+    // Router-backed resolver for endpoints in OTHER repos (worker mode);
+    // None keeps pure-local expansion.
+    cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
 ) -> Result<QueryResult> {
     let total_start = Instant::now();
 
@@ -331,7 +335,7 @@ pub(crate) async fn run_query_with_filters_and_mode(
 
     let mut all_chunks = base_chunks;
     if let Some(schema_version) = schema_version {
-        let expanded = graph_expand(&all_chunks, &db_map, schema_version).await;
+        let expanded = graph_expand(&all_chunks, &db_map, schema_version, cross).await;
         for e in expanded {
             all_chunks.push(MergeChunk {
                 file: e.file,
@@ -574,6 +578,10 @@ pub(crate) async fn run_sub_query(
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     warm_wait: std::time::Duration,
     graph_mode: QueryGraphMode,
+    // Kept None today: agentic-RAG sub-queries run pure-local (documented
+    // limitation). The parameter exists so the primary funnel and sub-queries
+    // share one expansion code path.
+    cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
 ) -> Result<Vec<MergeChunk>> {
     let embedding = voyage_client.embed_query(query).await?;
     if embedding.is_empty() {
@@ -622,7 +630,7 @@ pub(crate) async fn run_sub_query(
 
     let mut all_chunks = base_chunks;
     if let Some(schema_version) = schema_version {
-        let expanded = graph_expand(&all_chunks, &db_map, schema_version).await;
+        let expanded = graph_expand(&all_chunks, &db_map, schema_version, cross).await;
         for e in expanded {
             all_chunks.push(MergeChunk {
                 file: e.file,

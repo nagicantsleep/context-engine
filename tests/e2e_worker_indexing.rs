@@ -22,7 +22,7 @@ async fn adding_a_repo_auto_triggers_first_index() {
     std::fs::create_dir_all(&repo_dir).unwrap();
     std::fs::write(repo_dir.join("a.rs"), b"pub fn a() {}\n").unwrap();
     let repo = repo_dir.to_string_lossy().to_string();
-    let addr = start_router(&home).await;
+    let addr = start_router(&home).await.0;
     let client = Client::new();
     assert!(!worker_active(&client, addr, &repo).await);
 
@@ -70,7 +70,7 @@ async fn worker_boot_triggers_incremental_index() {
     std::fs::write(repo_dir.join("a.rs"), b"pub fn a() {}\n").unwrap();
     let repo = repo_dir.to_string_lossy().to_string();
     seed_settings(&home, &repo, 3600);
-    let addr = start_router(&home).await;
+    let addr = start_router(&home).await.0;
     let client = Client::new();
     let response = client
         .get(format!(

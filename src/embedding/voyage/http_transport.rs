@@ -93,6 +93,17 @@ impl VoyageClient {
             .json()
             .await
             .map_err(|error| EmbedError::Transient(error.into()))?;
+        // COUNT GUARD: a short/extra response must fail FAST (Other ⇒ no
+        // retry loop), never silently misalign vectors onto the wrong chunks.
+        // Real upstreams truncate under load; mocks may return one row for a
+        // multi-text batch — both are corruption, not transient errors.
+        if response.data.len() != texts.len() {
+            return Err(EmbedError::Other(anyhow::anyhow!(
+                "VoyageAI returned {} embeddings for {} inputs",
+                response.data.len(),
+                texts.len()
+            )));
+        }
         Ok(response
             .data
             .into_iter()

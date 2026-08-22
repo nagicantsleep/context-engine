@@ -41,7 +41,9 @@
 - **Hành vi:** Cross-repo edges materialize lazily after both repositories are indexed and the calling repository is re-indexed.
 - **Schema:** Version v8 is a diagnostic bump marking cross-repo awareness; no DDL or FQN migration is required.
 - **Quyết định:** [`docs/decisions/0002-multi-repo-namespace.md`](docs/decisions/0002-multi-repo-namespace.md)
+- **Router mode (2026-08-22):** cross-repo hoạt động đầy đủ trong process-per-project deployment qua symbol sidecars (index-time) + router callback (`/api/cross-repo/chunk`) cho nội dung chunk lúc query; callee unreachable → subtree bị drop. Xem README "Cross-repo navigation" và `docs/plans/active/cross-repo-router-mode.md`.
 - **Status:** `[x] done`
+
 
 ---
 

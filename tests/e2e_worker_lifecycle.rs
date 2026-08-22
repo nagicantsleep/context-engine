@@ -16,7 +16,7 @@ async fn opening_detail_spawns_no_worker() {
     std::fs::write(repo_dir.join("a.rs"), b"pub fn a() {}\n").unwrap();
     let repo = repo_dir.to_string_lossy().to_string();
     seed_settings(&home, &repo, 3600);
-    let addr = start_router(&home).await;
+    let addr = start_router(&home).await.0;
     let client = Client::new();
     let id = repo_id_b64(&repo);
 
@@ -42,7 +42,7 @@ async fn worker_spawn_idleexit_respawn_no_lock_collision() {
     std::fs::write(repo_dir.join("main.rs"), b"fn main() {}\n").unwrap();
     let repo = repo_dir.to_string_lossy().to_string();
     seed_settings(&home, &repo, 1);
-    let addr = start_router(&home).await;
+    let addr = start_router(&home).await.0;
     let client = Client::new();
 
     assert!(poke_action(&client, addr, &repo).await.is_success());
@@ -62,7 +62,7 @@ async fn worker_does_not_exit_while_requests_in_flight() {
     std::fs::write(repo_dir.join("lib.rs"), b"pub fn f() {}\n").unwrap();
     let repo = repo_dir.to_string_lossy().to_string();
     seed_settings(&home, &repo, 1);
-    let addr = start_router(&home).await;
+    let addr = start_router(&home).await.0;
     let client = Client::new();
     assert!(poke_action(&client, addr, &repo).await.is_success());
 

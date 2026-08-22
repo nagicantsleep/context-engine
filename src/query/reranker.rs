@@ -486,6 +486,7 @@ impl AgenticBackend for LiveBackend<'_> {
             self.repo_dbs,
             self.warm_wait,
             self.graph_mode,
+            None,
         )
     }
 

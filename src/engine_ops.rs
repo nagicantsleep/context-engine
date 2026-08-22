@@ -173,6 +173,9 @@ pub async fn run_query_op(
     rerank: bool,
     graph_mode: QueryGraphMode,
     warm_budget: Duration,
+    // Router-backed resolver for cross-repo BFS endpoints (worker mode).
+    // None in standalone/CLI — every endpoint is local there.
+    cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
 ) -> Result<QueryResult> {
     // Build the embedding client through the provider-aware factory so the
     // configured `embedding.provider` (Voyage or OpenAI) is honored.
@@ -213,6 +216,7 @@ pub async fn run_query_op(
         settings.llm.agentic_rag_grep_read,
         None,
         graph_mode,
+        cross,
     )
     .await
 }

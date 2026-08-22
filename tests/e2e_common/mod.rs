@@ -25,24 +25,28 @@ pub fn seed_settings(home: &TempDir, repo: &str, idle_secs: u64) {
     write_settings_atomic(&config_path(home.path()), &settings).expect("seed settings");
 }
 
-pub async fn start_router(home: &TempDir) -> SocketAddr {
+pub async fn start_router(
+    home: &TempDir,
+) -> (SocketAddr, context_engine_rs::router::proxy::ProxyCtx) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let home_path = home.path().to_path_buf();
-    let app = build_router_app(RouterBootOptions {
+    // Workers MUST know the callback URL so cross-repo BFS can reach the
+    // owning repo's worker through this router (same host ⇒ 127.0.0.1).
+    let (app, proxy) = build_router_app(RouterBootOptions {
         data_dir: Some(home_path.clone()),
         embeddings_dir: Some(home_path.join("embeddings")),
         bind: "127.0.0.1".to_string(),
         home_dir: Some(home_path),
         worker_exe: Some(worker_exe()),
+        router_url: Some(format!("http://127.0.0.1:{}", addr.port())),
     })
     .await
-    .expect("router app")
-    .0;
+    .expect("router app");
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
     });
-    addr
+    (addr, proxy)
 }
 
 pub fn repo_id_b64(repo: &str) -> String {

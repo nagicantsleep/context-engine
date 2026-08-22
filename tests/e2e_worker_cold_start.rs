@@ -71,7 +71,7 @@ async fn first_codebase_query_after_worker_startup_succeeds() {
     settings.embedding.voyage_base_url = Some(format!("http://{gateway_addr}/v1"));
     write_settings_atomic(&config_path(home.path()), &settings).unwrap();
 
-    let addr = start_router(&home).await;
+    let addr = start_router(&home).await.0;
     let response = Client::new()
         .post(format!("http://{addr}/api/mcp-tool"))
         .json(&serde_json::json!({

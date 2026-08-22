@@ -137,10 +137,20 @@ pub struct AppState {
     pub mcp_session_store: SharedSessionStore,
     /// In-memory, LRU-bounded chat conversation store (repo detail chat).
     pub conversations: Arc<crate::chat::ConversationStore>,
+    /// Router-backed cross-repo resolver (worker mode only; `None` in the
+    /// standalone monolith where every repo DB is already open in-process).
+    pub cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
+    /// Repos this process is allowed to OWN on disk. `Some(repo)` in
+    /// process-per-project worker mode (exactly one — the spawn argument);
+    /// `None` in the standalone monolith (every configured repo is local).
+    /// `/api/graph-chunk` gates on this BEFORE any DB open so a worker can
+    /// never even attempt another worker's RocksDB LOCK.
+    pub worker_owned_repo: Option<String>,
 }
 
 // ─── Router ────────────────────────────────────────────────────────────────
 
+/// Build the HTTP router (standalone/monolith + worker mode share this).
 pub fn build_router(
     home_dir: PathBuf,
     data_dir: PathBuf,
@@ -149,6 +159,59 @@ pub fn build_router(
     repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     settings: Arc<RwLock<crate::config::Settings>>,
     bind_host: &str,
+) -> Router {
+    build_router_inner(
+        home_dir,
+        data_dir,
+        embeddings_dir,
+        index_engine,
+        repo_dbs,
+        settings,
+        bind_host,
+        None,
+        None,
+    )
+}
+
+/// Worker/monolith variant with explicit cross-repo scope.
+///
+/// `cross_repo`: router-backed resolver (worker mode with `--router-url`).
+/// `worker_owned_repo`: pins the single repo a worker may open/serve; the
+/// graph-chunk handler rejects anything else with 404 before touching disk.
+pub fn build_router_with_scope(
+    home_dir: PathBuf,
+    data_dir: PathBuf,
+    embeddings_dir: PathBuf,
+    index_engine: Arc<IndexEngine>,
+    repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
+    settings: Arc<RwLock<crate::config::Settings>>,
+    bind_host: &str,
+    cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
+    worker_owned_repo: Option<String>,
+) -> Router {
+    build_router_inner(
+        home_dir,
+        data_dir,
+        embeddings_dir,
+        index_engine,
+        repo_dbs,
+        settings,
+        bind_host,
+        cross_repo,
+        worker_owned_repo,
+    )
+}
+
+fn build_router_inner(
+    home_dir: PathBuf,
+    data_dir: PathBuf,
+    embeddings_dir: PathBuf,
+    index_engine: Arc<IndexEngine>,
+    repo_dbs: Arc<RwLock<HashMap<String, Surreal<Db>>>>,
+    settings: Arc<RwLock<crate::config::Settings>>,
+    bind_host: &str,
+    cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
+    worker_owned_repo: Option<String>,
 ) -> Router {
     let state = AppState {
         home_dir: home_dir.clone(),
@@ -160,6 +223,8 @@ pub fn build_router(
         repo_mcp_services: Arc::new(RwLock::new(HashMap::new())),
         mcp_session_store: Arc::new(BoundedSessionStore::new()),
         conversations: Arc::new(crate::chat::ConversationStore::new()),
+        cross_repo,
+        worker_owned_repo,
     };
 
     // Build the StreamableHttpService for the /mcp endpoint.
@@ -188,6 +253,10 @@ pub fn build_router(
         mcp_config_with_store(base, state.mcp_session_store.clone())
     };
 
+    // Pre-clone BEFORE the move closure — `state` itself is consumed by
+    // `.with_state(state)` below, and a partial move into the closure would
+    // break that.
+    let cross_for_mcp = state.cross_repo.clone();
     let session_manager = Arc::new(LocalSessionManager::default());
     let mcp_service = StreamableHttpService::new(
         move || {
@@ -202,6 +271,7 @@ pub fn build_router(
                 mcp_dbs.clone(),
                 mcp_settings.clone(),
                 &enabled,
+                cross_for_mcp.clone(),
             ))
         },
         session_manager,
@@ -241,6 +311,7 @@ pub fn build_router(
         .route("/api/index-status", get(get_index_status))
         .route("/api/query", post(post_query))
         .route("/api/mcp-tool", post(post_mcp_tool))
+        .route("/api/graph-chunk", get(get_graph_chunk))
         .route("/api/mcp-tool/file-retrieval", post(post_file_retrieval))
         .route("/api/embedding-cache", delete(delete_embedding_cache))
         .route("/api/defender-status", get(get_defender_status))
@@ -300,6 +371,60 @@ async fn acquire_repo_db_if_indexed(
 /// The read guard is dropped before returning, so it never spans a DB `.await`.
 async fn repo_generation(state: &AppState, repo: &str) -> u32 {
     state.settings.read().await.repo_generation(repo)
+}
+#[derive(Deserialize)]
+struct GraphChunkQuery {
+    fqn: String,
+    file: String,
+}
+
+/// GET /api/graph-chunk?fqn=&file= — serve ONE chunk for an FQN owned by this
+/// process's configured repos.
+///
+/// The router's `/api/cross-repo/chunk` proxies here after resolving which
+/// repo owns `file`; the ownership re-check below is the authority backstop
+/// (a worker must never serve another worker's repo, and a lookup for an
+/// unconfigured path must never materialize a phantom DB directory).
+async fn get_graph_chunk(
+    State(state): State<AppState>,
+    Query(q): Query<GraphChunkQuery>,
+) -> Response {
+    let settings = state.settings.read().await.clone();
+    let owner = settings
+        .repos
+        .iter()
+        .map(|r| crate::store::normalize_repo_path(r))
+        .find(|r| path_in_repo(&q.file, r));
+    let Some(owner) = owner else {
+        let body = json!({ "error": "file is not owned by this instance" });
+        return (StatusCode::NOT_FOUND, Json(body)).into_response();
+    };
+    // Worker-mode scope gate: a process-per-project worker may ONLY ever
+    // touch the repo it was spawned for. Checked BEFORE any DB open so a
+    // crafted request can never even attempt another worker's RocksDB LOCK
+    // (settings.repos alone is not authoritative — config reload can widen
+    // it; the boot-pinned spawn argument cannot change).
+    if let Some(owned) = &state.worker_owned_repo
+        && owner != *owned
+    {
+        let body = json!({ "error": "file is not owned by this instance" });
+        return (StatusCode::NOT_FOUND, Json(body)).into_response();
+    };
+    let generation = settings.repo_generation(&owner);
+    let db = match store::get_or_open(&state.repo_dbs, &state.data_dir, &owner, generation).await {
+        Ok(db) => db,
+        Err(e) => {
+            let body = json!({ "error": format!("could not open index database: {e}") });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
+        }
+    };
+    match crate::query::graph_expand::fetch_symbol_chunk_data(&db, &q.fqn).await {
+        Some(data) => Json(data).into_response(),
+        None => {
+            let body = json!({ "error": "symbol or overlapping chunk not found" });
+            (StatusCode::NOT_FOUND, Json(body)).into_response()
+        }
+    }
 }
 
 /// Map a `store::ops` error to a 500 JSON response.
@@ -1272,6 +1397,7 @@ async fn post_query(State(state): State<AppState>, Json(req): Json<QueryRequest>
         req.rerank,
         graph_mode,
         warm_budget,
+        state.cross_repo.as_ref(),
     )
     .await
     {
@@ -1313,6 +1439,7 @@ async fn post_mcp_tool(State(state): State<AppState>, Json(req): Json<McpToolReq
         &settings,
         &req.information_request,
         &req.workspace_full_path,
+        state.cross_repo.as_ref(),
     )
     .await;
     Json(json!({ "result": result })).into_response()
@@ -1481,6 +1608,7 @@ async fn handle_repo_mcp(
             let dbs = state.repo_dbs.clone();
             let settings = state.settings.clone();
             let repo_clone = repo.clone();
+            let cross = state.cross_repo.clone();
             let new_service = StreamableHttpService::new(
                 move || {
                     let enabled = settings
@@ -1495,6 +1623,7 @@ async fn handle_repo_mcp(
                         dbs.clone(),
                         settings.clone(),
                         &enabled,
+                        cross.clone(),
                     ))
                 },
                 Arc::new(LocalSessionManager::default()),
