@@ -24,7 +24,7 @@ Measured impact: 7+ second delays on lock acquisition in similar projects.
 ```powershell
 # PowerShell as Administrator
 Add-MpPreference -ExclusionPath "$env:USERPROFILE\.context-engine\data"
-Add-MpPreference -ExclusionPath "E:\Workspaces\vibervn-context-engine\target"
+Add-MpPreference -ExclusionPath "E:\Workspaces\context-engine\target"
 ```
 
 Verify:
@@ -412,7 +412,7 @@ Permission denied on RocksDB operations.
 
 If issue persists:
 
-1. Check existing issues: https://github.com/your-org/vibervn-context-engine/issues
+1. Check existing issues: https://github.com/nagicantsleep/context-engine/issues
 2. Collect diagnostic info:
 
 ```bash

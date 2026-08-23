@@ -100,7 +100,7 @@ git clone https://github.com/user/repo.git
 ## Build Context Engine
 
 ```bash
-cd ~/projects/vibervn-context-engine
+cd ~/projects/context-engine
 cargo build --release
 ```
 
@@ -120,7 +120,7 @@ source ~/.bashrc
 context-engine-rs --version
 
 # Index a test repository
-context-engine-rs index ~/projects/vibervn-context-engine
+context-engine-rs index ~/projects/context-engine
 
 # Check database
 ls ~/.context-engine/data/
@@ -193,7 +193,7 @@ WSL1 detected. Upgrade to WSL2 (see Prerequisites).
 Install "Remote - WSL" extension. Open WSL project:
 
 ```bash
-cd ~/projects/vibervn-context-engine
+cd ~/projects/context-engine
 code .
 ```
 

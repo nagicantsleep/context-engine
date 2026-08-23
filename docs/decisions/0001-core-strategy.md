@@ -1,4 +1,4 @@
-# 0001 Core Strategy — vibervn as the Integration Point
+# 0001 Core Strategy — context-engine as the Integration Point
 
 Date: 2026-08-01
 
@@ -8,17 +8,17 @@ Accepted
 
 ## Context
 
-Comparative analysis (2026-08-01) of vibervn-context-engine against: Graphify (YC S26),
+Comparative analysis (2026-08-01) of context-engine against: Graphify (YC S26),
 codegraph/colbymchenry (Rust+SQLite), CodeGraphContext (Python+SCIP), GitNexus, Sourcegraph
 SCIP, ast-grep, bloop (archived 2025), continue.dev.
 
-vibervn's pipeline (embed → graph-expand → agentic rerank) was assessed as the most complete
+context-engine's pipeline (embed → graph-expand → agentic rerank) was assessed as the most complete
 on query quality and performance. Competing tools contribute narrow, separable value that does
 not justify a runtime dependency or fork.
 
 ## Decision
 
-**vibervn is the integration core.** Do not orchestrate or merge external tools at runtime.
+**context-engine is the integration core.** Do not orchestrate or merge external tools at runtime.
 Selectively absorb specific, well-scoped gaps directly into the Rust codebase.
 
 ## Alternatives Considered

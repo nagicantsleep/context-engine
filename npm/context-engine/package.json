@@ -1,0 +1,22 @@
+{
+  "name": "context-engine",
+  "version": "0.0.0",
+  "description": "Local semantic code context engine — indexes large repos and serves a codebase-retrieval MCP tool",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nagicantsleep/context-engine.git"
+  },
+  "bin": {
+    "context-engine": "bin/cli.js"
+  },
+  "files": ["bin", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "context-engine-linux-x64": "0.0.0",
+    "context-engine-linux-arm64": "0.0.0",
+    "context-engine-darwin-arm64": "0.0.0",
+    "context-engine-win32-x64": "0.0.0"
+  }
+}

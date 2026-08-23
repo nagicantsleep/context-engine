@@ -49,7 +49,7 @@ fn migrate_v1_to_v2(mut value: Value) -> Result<Value, ConfigError> {
 /// SHARED path across multiple instances, so identical code chunks are embedded
 /// once (the cache is concurrency-safe; only RocksDB needs per-instance
 /// isolation). `None` means the builtin default
-/// `~/.vibervn/context-engine/embeddings` (anchored to home, not `data_dir`).
+/// `~/.context-engine/embeddings` (anchored to home, not `data_dir`).
 fn migrate_v2_to_v3(mut value: Value) -> Result<Value, ConfigError> {
     if let Value::Object(ref mut obj) = value {
         obj.entry("embeddings_dir".to_string())
@@ -507,9 +507,9 @@ pub struct Settings {
     /// `<data_dir>/rocksdb/`. The embedding cache defaults to
     /// `<data_dir>/embeddings/` but can be relocated independently via
     /// `embeddings_dir`. `settings.json` itself ALWAYS lives at
-    /// `~/.vibervn/context-engine/settings.json` regardless of this value.
+    /// `~/.context-engine/settings.json` regardless of this value.
     ///
-    /// `None` means "use the builtin default" (`~/.vibervn/context-engine`),
+    /// `None` means "use the builtin default" (`~/.context-engine`),
     /// distinguishing an unset preference from an explicit choice.
     /// Boot precedence: CLI flag > env `CONTEXT_ENGINE_DATA_DIR` >
     /// `Settings.data_dir` > builtin default.
@@ -526,11 +526,11 @@ pub struct Settings {
     /// needs per-instance isolation.
     ///
     /// `None` means "use the builtin default" —
-    /// `~/.vibervn/context-engine/embeddings`, anchored to home (NOT to
+    /// `~/.context-engine/embeddings`, anchored to home (NOT to
     /// `data_dir`) so multiple instances with different `--data-dir` values
     /// share ONE cache by default.
     /// Boot precedence: CLI flag > env `CONTEXT_ENGINE_EMBEDDINGS_DIR` >
-    /// `Settings.embeddings_dir` > `~/.vibervn/context-engine/embeddings`.
+    /// `Settings.embeddings_dir` > `~/.context-engine/embeddings`.
     /// Like `data_dir`, this is boot-frozen: a PUT change persists for the next
     /// launch only.
     #[serde(default)]
@@ -565,14 +565,9 @@ pub struct Settings {
     /// against a single user (one machine = one user). Computed once on first
     /// boot via `ensure_machine_id` and persisted; never recomputed at runtime.
     ///
-    /// Seed value: `sha256(MACHINE_ID_SALT ‖ \0 ‖ hardware_uid)` as hex when
-    /// `machine_uid::get()` succeeds. This intentionally matches the legacy
-    /// formula used by the free-trial claim flow before persistence — old
-    /// claims tied to a hardware-derived id keep matching after the upgrade.
-    /// On the rare host where `machine_uid::get()` fails we fall back to a
-    /// random UUIDv4. The fallback is only "safe" because the result is
-    /// persisted: every subsequent run reads the same value, so idempotency
-    /// (one machine → one user) holds across restarts.
+    /// The identifier is derived from the host machine identifier when
+    /// available. If that lookup fails, a random first-boot fallback is
+    /// persisted so idempotency still holds across restarts.
     ///
     /// `None` on the in-memory struct only ever occurs *during boot* between
     /// `ensure_dir_and_load` and `ensure_machine_id`. After boot the field is
@@ -587,12 +582,9 @@ pub struct Settings {
     #[serde(default)]
     pub purchased_plans: Vec<PurchasedPlan>,
 }
-
-/// Salt mixed into the machine-id hash. A fixed compile-in constant: it must
-/// stay byte-identical across versions/restarts so the seed value computed by
-/// `ensure_machine_id` matches what the legacy free-trial claim flow used to
-/// compute on the fly. Changing this breaks every existing free-trial claim.
-pub const MACHINE_ID_SALT: &str = "vibervn-context-engine::free-trial::v1";
+/// Versioned domain separator for deterministic machine IDs. Keep it
+/// byte-identical across releases so newly computed IDs remain stable.
+pub const MACHINE_ID_DOMAIN: &[u8] = b"context-engine-machine-id-v1\0";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -665,8 +657,6 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-// ─── Path helpers ──────────────────────────────────────────────────────────
-
 /// Return the path of `settings.json` under `home_dir`.
 ///
 /// settings.json's location is intentionally fixed (NOT controlled by
@@ -674,23 +664,20 @@ impl std::error::Error for ConfigError {}
 /// so deriving its location from the field would be circular. See the bootstrap
 /// notes on `Settings.data_dir`.
 pub fn config_path(home_dir: &Path) -> PathBuf {
-    home_dir
-        .join(".vibervn")
-        .join("context-engine")
-        .join("settings.json")
+    home_dir.join(".context-engine").join("settings.json")
 }
 
 /// Return the builtin-default data directory under `home_dir`
-/// (`~/.vibervn/context-engine`).
+/// (`~/.context-engine`).
 ///
 /// Used as the lowest-precedence fallback in boot resolution when no CLI flag,
 /// env var, or persisted `Settings.data_dir` is set.
 pub fn default_data_dir(home_dir: &Path) -> PathBuf {
-    home_dir.join(".vibervn").join("context-engine")
+    home_dir.join(".context-engine")
 }
 
 /// Return the default embedding-cache root under `home_dir`
-/// (`~/.vibervn/context-engine/embeddings`).
+/// (`~/.context-engine/embeddings`).
 ///
 /// Used as the lowest-precedence fallback in boot resolution when no CLI flag,
 /// env var, or persisted `Settings.embeddings_dir` is set. Anchored to
@@ -698,8 +685,8 @@ pub fn default_data_dir(home_dir: &Path) -> PathBuf {
 /// cache is concurrency-safe and meant to be shared, so multiple instances
 /// running with different `--data-dir` values share ONE cache by default —
 /// identical chunks are embedded once. A pure default install (no flags) still
-/// lands at `~/.vibervn/context-engine/embeddings`, byte-identical to the
-/// historical layout, because `default_data_dir(home)` is the same base.
+/// lands at `~/.context-engine/embeddings`, byte-identical layout to the
+/// historical one, because `default_data_dir(home)` is the same base.
 pub fn default_embeddings_dir(home_dir: &Path) -> PathBuf {
     default_data_dir(home_dir).join("embeddings")
 }
@@ -936,19 +923,11 @@ pub async fn maybe_reload_settings(
         }
     }
 }
-/// once at boot, after `ensure_dir_and_load`. Mutates `settings` in place.
-///
-/// First boot (or upgrades from a settings file written before this field
-/// existed): compute `sha256(MACHINE_ID_SALT ‖ \0 ‖ hardware_uid)` as hex,
-/// matching the legacy free-trial claim formula so machines that already
-/// claimed pick the SAME id and continue to dedup against their existing user.
-/// If `machine_uid::get()` fails (rare hosts where no hardware uid is
-/// reachable), fall back to a random UUIDv4. The fallback is only sound
-/// BECAUSE we persist it immediately — the next boot reads the same value, so
-/// "one machine = one user" still holds across restarts.
-///
-/// Subsequent boots: field already populated → no-op (don't recompute, don't
-/// rewrite).
+/// Ensure a stable machine identifier once at boot, after
+/// `ensure_dir_and_load`. The value is persisted and never recomputed at runtime.
+/// If `machine_uid::get()` fails, use a random first-boot fallback and persist
+/// it immediately so one-machine/one-user deduplication still holds across
+/// restarts.
 pub fn ensure_machine_id(home_dir: &Path, settings: &mut Settings) -> Result<(), ConfigError> {
     if settings
         .machine_id
@@ -965,13 +944,11 @@ pub fn ensure_machine_id(home_dir: &Path, settings: &mut Settings) -> Result<(),
     write_settings_atomic(&path, settings)
 }
 
-/// Compute the machine-id seed used by `ensure_machine_id`. Public-in-crate so
-/// tests can assert the legacy formula is preserved.
+/// Compute the machine-id seed used by `ensure_machine_id`.
 fn compute_seed_machine_id() -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(MACHINE_ID_SALT.as_bytes());
-    hasher.update(b"\x00");
+    hasher.update(MACHINE_ID_DOMAIN);
     match machine_uid::get() {
         Ok(uid) => {
             hasher.update(uid.as_bytes());
@@ -1008,6 +985,7 @@ fn compute_seed_machine_id() -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
 
     /// version 0 is invalid — ensure_dir_and_load must return MigrationFailed,
     /// not panic (debug) or silently wrap-around (release).
@@ -1176,13 +1154,13 @@ mod tests {
         let dd = default_data_dir(home.path());
         assert_eq!(
             dd,
-            home.path().join(".vibervn").join("context-engine"),
+            home.path().join(".context-engine"),
             "default data_dir must match historical layout for byte-identical default install"
         );
     }
 
     /// `default_embeddings_dir` is anchored to `home_dir`
-    /// (`~/.vibervn/context-engine/embeddings`), NOT to the resolved data_dir,
+    /// (`~/.context-engine/embeddings`), NOT to the resolved data_dir,
     /// so instances with different data dirs share one cache by default. A pure
     /// default install still matches the historical layout.
     #[test]
@@ -1191,10 +1169,7 @@ mod tests {
         let ed = default_embeddings_dir(home.path());
         assert_eq!(
             ed,
-            home.path()
-                .join(".vibervn")
-                .join("context-engine")
-                .join("embeddings"),
+            home.path().join(".context-engine").join("embeddings"),
             "default embeddings_dir must match historical layout for byte-identical default install"
         );
     }

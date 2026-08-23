@@ -303,7 +303,7 @@ Measured on 2023 MacBook Pro (M2 Max, 32GB RAM):
 
 | Repository | Files | Symbols | Edges | Full Index | Incremental (1% change) |
 |------------|-------|---------|-------|------------|-------------------------|
-| vibervn-context-engine | 247 | 2,103 | 4,521 | 1.2s | 45ms |
+| context-engine | 247 | 2,103 | 4,521 | 1.2s | 45ms |
 | Linux kernel 6.5 | 41,203 | 890,432 | 3,201,445 | 9m 23s | 450ms |
 | Chromium (partial) | 15,678 | 312,109 | 1,103,221 | 3m 12s | 180ms |
 

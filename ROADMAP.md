@@ -1,10 +1,10 @@
-# vibervn-context-engine — Roadmap
+# context-engine — Roadmap
 
 > Tổng hợp từ phân tích so sánh với Graphify, codegraph, CodeGraphContext, GitNexus, Sourcegraph, ast-grep, bloop, continue.dev (2026-08-01).
 
 ## Chiến lược
 
-**vibervn làm core.** Không orchestrate/merge các tool bên ngoài — absorb có chọn lọc các gap cụ thể trực tiếp vào codebase Rust. Lý do: pipeline vibervn (embed → graph-expand → agentic rerank) đã hoàn chỉnh nhất về query quality và performance; các tools Python/external chỉ đóng góp narrow, separable value không đủ để justify runtime dependency hay fork.
+**context-engine làm core.** Không orchestrate/merge các tool bên ngoài — absorb có chọn lọc các gap cụ thể trực tiếp vào codebase Rust. Lý do: pipeline context-engine (embed → graph-expand → agentic rerank) đã hoàn chỉnh nhất về query quality và performance; các tools Python/external chỉ đóng góp narrow, separable value không đủ để justify runtime dependency hay fork.
 
 ---
 

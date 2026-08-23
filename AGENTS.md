@@ -33,7 +33,7 @@ an external orchestrator.
 
 ## Project
 
-**vibervn-context-engine** is a Rust binary (crate `context-engine-rs`) that indexes
+**context-engine** is a Rust binary (crate `context-engine-rs`) that indexes
 repositories via Tree-sitter symbol extraction and Voyage AI embeddings, stores chunks
 in SurrealDB (RocksDB backend), and exposes a Web UI and an MCP server.
 
@@ -76,10 +76,10 @@ settings enablement.
 ### Default runtime paths
 | Item | Default path |
 |------|-------------|
-| Settings | `~/.vibervn/context-engine/settings.json` |
-| Per-repo SurrealDB | generation 0: `~/.vibervn/context-engine/rocksdb/<name>/`; generation >=1: `~/.vibervn/context-engine/rocksdb/<generation>/<name>/` |
-| Embedding cache | `~/.vibervn/context-engine/embeddings/` |
-| Router sidecars | `~/.vibervn/context-engine/sidecar/` |
+| Settings | `~/.context-engine/settings.json` |
+| Per-repo SurrealDB | generation 0: `~/.context-engine/rocksdb/<name>/`; generation >=1: `~/.context-engine/rocksdb/<generation>/<name>/` |
+| Embedding cache | `~/.context-engine/embeddings/` |
+| Router sidecars | `~/.context-engine/sidecar/` |
 
 ## Multi-agent engineering workflow
 

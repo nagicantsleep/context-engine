@@ -2924,7 +2924,6 @@ function planApplyEntry(entry) {
   }
   cfg.llm.provider = 'openai';
   cfg.llm.openai_base_url = entry.base_url;
-  cfg.llm.rerank_model = 'vibervn-rag-0626';
   if (!cfg.llm.api_keys.includes(entry.proxy_key)) {
     cfg.llm.api_keys.unshift(entry.proxy_key);
   }
@@ -2940,7 +2939,6 @@ function planReplaceEntry(entry) {
   cfg.llm.provider = 'openai';
   cfg.llm.api_keys = [entry.proxy_key];
   cfg.llm.openai_base_url = entry.base_url;
-  cfg.llm.rerank_model = 'vibervn-rag-0626';
   saveNow();
   renderAll();
 }

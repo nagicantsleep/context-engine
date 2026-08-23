@@ -1,0 +1,9 @@
+{
+  "name": "context-engine-linux-arm64",
+  "version": "0.0.0",
+  "description": "context-engine binary for Linux arm64",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin", "README.md"],
+  "engines": { "node": ">=18" }
+}

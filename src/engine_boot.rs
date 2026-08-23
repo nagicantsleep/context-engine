@@ -25,7 +25,7 @@ use crate::store;
 /// into `server::build_router` (HTTP server) or used directly by the CLI.
 pub struct BootedEngine {
     /// Resolved home directory. Used ONLY for `settings.json` access (its
-    /// location is fixed at `~/.vibervn/context-engine/settings.json`).
+    /// location is fixed at `~/.context-engine/settings.json`).
     pub home_dir: PathBuf,
     /// Boot-resolved data directory (CLI > env > `Settings.data_dir` > builtin
     /// default). Captured once; never re-read from `Settings` at runtime.
@@ -176,13 +176,13 @@ pub async fn boot_engine_with_home(
 
     // Resolve embeddings_dir with its own precedence:
     //   CLI flag > env CONTEXT_ENGINE_EMBEDDINGS_DIR > Settings.embeddings_dir
-    //   > ~/.vibervn/context-engine/embeddings (anchored to HOME, not data_dir).
+    //   > ~/.context-engine/embeddings (anchored to HOME, not data_dir).
     // Anchoring the default to home — not the resolved data_dir — means multiple
     // instances launched with different --data-dir values share ONE cache by
     // default: the content-addressed cache is concurrency-safe, so sharing it
     // avoids re-embedding identical chunks (only RocksDB needs per-instance
     // isolation). A pure default install still lands at
-    // ~/.vibervn/context-engine/embeddings, byte-identical to before.
+    // ~/.context-engine/embeddings, byte-identical to before.
     // Also boot-frozen. We do NOT fail-fast on a create_dir_all error here: the
     // cache degrades gracefully (EmbeddingCache::new returns None and the
     // pipeline runs without a cache), unlike RocksDB which must open — so a

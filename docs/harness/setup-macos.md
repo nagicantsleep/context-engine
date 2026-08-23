@@ -37,8 +37,8 @@ cargo --version
 ## Build Context Engine
 
 ```bash
-git clone https://github.com/your-org/vibervn-context-engine.git
-cd vibervn-context-engine
+git clone https://github.com/nagicantsleep/context-engine.git
+cd context-engine
 cargo build --release
 ```
 
@@ -101,7 +101,7 @@ mdutil -s ~/.context-engine/data
 Also exclude build artifacts:
 
 ```bash
-sudo mdutil -i off ~/vibervn-context-engine/target
+sudo mdutil -i off ~/context-engine/target
 ```
 
 ## Add to PATH
@@ -125,7 +125,7 @@ source ~/.bash_profile
 context-engine-rs --version
 
 # Index a test repository
-context-engine-rs index ~/vibervn-context-engine
+context-engine-rs index ~/context-engine
 
 # Check database
 ls ~/.context-engine/data/

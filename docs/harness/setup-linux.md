@@ -86,8 +86,8 @@ Reboot, then verify with `ulimit -n`.
 ## Build Context Engine
 
 ```bash
-git clone https://github.com/your-org/vibervn-context-engine.git
-cd vibervn-context-engine
+git clone https://github.com/nagicantsleep/context-engine.git
+cd context-engine
 cargo build --release
 ```
 
@@ -107,7 +107,7 @@ source ~/.bashrc
 context-engine-rs --version
 
 # Index a test repository
-context-engine-rs index ~/vibervn-context-engine
+context-engine-rs index ~/context-engine
 
 # Check database
 ls ~/.context-engine/data/
@@ -129,7 +129,7 @@ After=network.target
 [Service]
 Type=simple
 User=youruser
-WorkingDirectory=/home/youruser/vibervn-context-engine
+WorkingDirectory=/home/youruser/context-engine
 ExecStart=/home/youruser/.cargo/bin/context-engine-rs serve --host 127.0.0.1 --port 8080
 Restart=on-failure
 RestartSec=10

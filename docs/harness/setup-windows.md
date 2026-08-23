@@ -31,7 +31,7 @@ Add exclusions for RocksDB directories:
 ```powershell
 # Run PowerShell as Administrator
 Add-MpPreference -ExclusionPath "$env:USERPROFILE\.context-engine\data"
-Add-MpPreference -ExclusionPath "E:\Workspaces\vibervn-context-engine\target"
+Add-MpPreference -ExclusionPath "E:\Workspaces\context-engine\target"
 
 # Verify exclusions
 Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
@@ -71,7 +71,7 @@ git config --global core.eol lf
 ## Build Context Engine
 
 ```bash
-cd E:\Workspaces\vibervn-context-engine
+cd E:\Workspaces\context-engine
 cargo build --release
 ```
 
@@ -99,7 +99,7 @@ if ($userPath -notlike "*$cargoPath*") {
 context-engine-rs --version
 
 # Index a test repository
-context-engine-rs index E:\Workspaces\vibervn-context-engine
+context-engine-rs index E:\Workspaces\context-engine
 
 # Check database was created
 ls ~/.context-engine/data/

@@ -1,4 +1,4 @@
-# vibervn-context-engine
+# context-engine
 
 **English** · [Tiếng Việt](README-vi.md) · [中文](README-zh.md)
 
@@ -12,21 +12,21 @@ tag forces npx to fetch the newest published version instead of reusing a
 stale cached one:
 
 ```bash
-npx vibervn-context-engine@latest
+npx context-engine@latest
 ```
 
 This boots the HTTP server on port 6699 (web UI at http://127.0.0.1:6699,
 MCP endpoint at `/mcp`). Any CLI flags are forwarded to the binary:
 
 ```bash
-npx vibervn-context-engine@latest --port 8080 --bind 0.0.0.0
+npx context-engine@latest --port 8080 --bind 0.0.0.0
 ```
 
-Or install it globally to get a persistent `vibervn-context-engine` command:
+Or install it globally to get a persistent `context-engine` command:
 
 ```bash
-npm install -g vibervn-context-engine@latest
-vibervn-context-engine --port 6699
+npm install -g context-engine@latest
+context-engine --port 6699
 ```
 
 ### Runtime model and data paths

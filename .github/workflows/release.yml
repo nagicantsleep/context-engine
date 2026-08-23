@@ -43,19 +43,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
-            npm-pkg: vibervn-context-engine-linux-x64
+            npm-pkg: context-engine-linux-x64
             bin: context-engine-rs
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-            npm-pkg: vibervn-context-engine-linux-arm64
+            npm-pkg: context-engine-linux-arm64
             bin: context-engine-rs
           - target: aarch64-apple-darwin
             runner: macos-14
-            npm-pkg: vibervn-context-engine-darwin-arm64
+            npm-pkg: context-engine-darwin-arm64
             bin: context-engine-rs
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
-            npm-pkg: vibervn-context-engine-win32-x64
+            npm-pkg: context-engine-win32-x64
             bin: context-engine-rs.exe
 
     name: Build ${{ matrix.target }}
@@ -149,11 +149,11 @@ jobs:
         run: |
           set -e
           for p in linux-x64 linux-arm64 darwin-arm64; do
-            bin="artifacts/vibervn-context-engine-$p/bin/context-engine-rs"
+            bin="artifacts/context-engine-$p/bin/context-engine-rs"
             test -f "$bin" || { echo "::error::missing $bin"; exit 1; }
             chmod +x "$bin"
           done
-          win="artifacts/vibervn-context-engine-win32-x64/bin/context-engine-rs.exe"
+          win="artifacts/context-engine-win32-x64/bin/context-engine-rs.exe"
           test -f "$win" || { echo "::error::missing $win"; exit 1; }
 
       - name: Publish packages
@@ -175,7 +175,7 @@ jobs:
 
           MAJOR="${BASE%%.*}"; REST="${BASE#*.}"; MINOR="${REST%%.*}"; PATCH="${REST#*.}"
           VERSION="$BASE"
-          while npm view "vibervn-context-engine@$VERSION" version >/dev/null 2>&1; do
+          while npm view "context-engine@$VERSION" version >/dev/null 2>&1; do
             PATCH=$((PATCH + 1))
             VERSION="$MAJOR.$MINOR.$PATCH"
           done
@@ -211,14 +211,14 @@ jobs:
 
           # Platform packages FIRST (so the main pkg's optionalDependencies resolve)...
           for p in linux-x64 linux-arm64 darwin-arm64 win32-x64; do
-            DIR="artifacts/vibervn-context-engine-$p"
+            DIR="artifacts/context-engine-$p"
             stamp "$DIR"
             publish_if_new "$DIR"
           done
 
           # ...main package LAST.
-          stamp "npm/vibervn-context-engine"
-          publish_if_new "npm/vibervn-context-engine"
+          stamp "npm/context-engine"
+          publish_if_new "npm/context-engine"
 
       - name: Commit version bump back to master
         if: steps.publish.outputs.version != ''

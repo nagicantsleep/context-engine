@@ -106,7 +106,7 @@ impl IntoResponse for ConfigError {
 #[derive(Clone)]
 pub struct AppState {
     /// Resolved home directory. Used ONLY for `settings.json` access (its
-    /// location is fixed at `~/.vibervn/context-engine/settings.json` — see
+    /// location is fixed at `~/.context-engine/settings.json` — see
     /// the bootstrap notes on `Settings.data_dir`).
     pub home_dir: PathBuf,
     /// Boot-resolved data directory (CLI > env > `Settings.data_dir` > builtin
@@ -582,7 +582,7 @@ async fn put_config(State(state): State<AppState>, body: axum::body::Bytes) -> R
     }
 
     // (4b) Same boot-frozen treatment for embeddings_dir. The default is
-    // anchored to home (`~/.vibervn/context-engine/embeddings`), matching how
+    // anchored to home (`~/.context-engine/embeddings`), matching how
     // boot resolution computes it — NOT derived from the configured data_dir.
     // A mismatch is lower-risk than data_dir (a cache-root switch only causes
     // cache misses, not split-brain), but the running process still keeps its
@@ -1974,16 +1974,22 @@ async fn post_defender_exclude(State(state): State<AppState>) -> Response {
 
 // ─── Plan proxy (admin gateway) ──────────────────────────────────────────
 
-const PLAN_DEFAULT_ADMIN: &str = "https://context-engine.viber.vn";
 const PLAN_PROXY_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn plan_admin_base() -> String {
+fn plan_gateway_unconfigured() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "plan gateway is not configured" })),
+    )
+        .into_response()
+}
+
+fn plan_admin_base() -> Result<String, Response> {
     std::env::var("CONTEXT_ENGINE_ADMIN_URL")
         .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| PLAN_DEFAULT_ADMIN.to_string())
-        .trim_end_matches('/')
-        .to_string()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(plan_gateway_unconfigured)
 }
 
 fn plan_http_client() -> reqwest::Client {
@@ -1993,9 +1999,7 @@ fn plan_http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-// Salt mixed into the machine-id hash. Now lives in `crate::config` since the
-// id is computed once at boot and persisted to settings.json. See
-// `config::ensure_machine_id` and `config::MACHINE_ID_SALT`.
+// The machine id is computed once at boot and persisted to settings.json.
 
 /// Read the persisted machine_id from the live settings handle. Boot guarantees
 /// `Some(...)` after `ensure_machine_id`; `None`/empty would only occur if a
@@ -2018,7 +2022,10 @@ async fn machine_id_from_settings(state: &AppState) -> Result<String, Response> 
 }
 
 async fn plan_get_free_trial(State(_): State<AppState>) -> Response {
-    let base = plan_admin_base();
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let url = format!("{base}/api/free-trial");
 
     let res = match plan_http_client().get(&url).send().await {
@@ -2047,12 +2054,14 @@ async fn plan_post_free_trial_claim(State(state): State<AppState>) -> Response {
     // implementation derived it on the fly via machine_uid::get(); now both
     // free-trial and paid checkout share the same persisted source so a
     // hardware-uid hiccup at runtime can never re-roll the id.
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let machine_id = match machine_id_from_settings(&state).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-
-    let base = plan_admin_base();
     let url = format!("{base}/api/free-trial/claim");
 
     let res = match plan_http_client()
@@ -2081,8 +2090,7 @@ async fn plan_post_free_trial_claim(State(state): State<AppState>) -> Response {
     if status.is_success()
         && let Ok(mut obj) = serde_json::from_slice::<Value>(&body_bytes)
     {
-        let admin_url = plan_admin_base();
-        obj["base_url"] = Value::String(format!("{admin_url}/v1"));
+        obj["base_url"] = Value::String(format!("{base}/v1"));
         return (status, Json(obj)).into_response();
     }
 
@@ -2094,7 +2102,10 @@ async fn plan_post_free_trial_claim(State(state): State<AppState>) -> Response {
 }
 
 async fn plan_get_packages(State(_): State<AppState>) -> Response {
-    let base = plan_admin_base();
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let url = format!("{base}/api/packages");
 
     let res = match plan_http_client().get(&url).send().await {
@@ -2120,7 +2131,10 @@ async fn plan_get_packages(State(_): State<AppState>) -> Response {
 /// Proxy the admin gateway's enabled-payment-methods so the engine UI popup can
 /// show only the methods the operator turned on (and nothing when both are off).
 async fn plan_get_payment_methods(State(_): State<AppState>) -> Response {
-    let base = plan_admin_base();
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let url = format!("{base}/api/payment-methods");
 
     let res = match plan_http_client().get(&url).send().await {
@@ -2148,22 +2162,23 @@ async fn plan_post_checkout(State(state): State<AppState>, Json(body): Json<Valu
     // can dedup paid purchases per machine (one machine = one user, with
     // accumulated budgets/expiry on repeat purchase). The browser never sees
     // or controls this — it only sends `package_id`.
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let machine_id = match machine_id_from_settings(&state).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
     let mut body = body;
-    if let Value::Object(ref mut obj) = body {
+    if let Value::Object(obj) = &mut body {
         obj.insert("machine_id".to_string(), Value::String(machine_id));
     } else {
         // Frontend always sends a JSON object; if it doesn't, build one from
         // scratch so the admin gateway never sees a missing machine_id.
         body = json!({ "machine_id": machine_id });
     }
-
-    let base = plan_admin_base();
     let url = format!("{base}/api/checkout");
-
     let res = match plan_http_client()
         .post(&url)
         .header("content-type", "application/json")
@@ -2188,8 +2203,7 @@ async fn plan_post_checkout(State(state): State<AppState>, Json(body): Json<Valu
     if status.is_success()
         && let Ok(mut obj) = serde_json::from_slice::<Value>(&body_bytes)
     {
-        let admin_url = plan_admin_base();
-        obj["base_url"] = Value::String(format!("{admin_url}/v1"));
+        obj["base_url"] = Value::String(format!("{base}/v1"));
         return (status, Json(obj)).into_response();
     }
 
@@ -2201,7 +2215,10 @@ async fn plan_post_checkout(State(state): State<AppState>, Json(body): Json<Valu
 }
 
 async fn plan_get_order_status(State(_): State<AppState>, Path(invoice): Path<String>) -> Response {
-    let base = plan_admin_base();
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let url = format!("{base}/api/orders/{invoice}/status");
 
     let res = match plan_http_client().get(&url).send().await {
@@ -2223,8 +2240,7 @@ async fn plan_get_order_status(State(_): State<AppState>, Path(invoice): Path<St
         && let Ok(mut obj) = serde_json::from_slice::<Value>(&body_bytes)
     {
         if obj.get("status").and_then(|s| s.as_str()) == Some("COMPLETED") {
-            let admin_url = plan_admin_base();
-            obj["base_url"] = Value::String(format!("{admin_url}/v1"));
+            obj["base_url"] = Value::String(format!("{base}/v1"));
         }
         return (status, Json(obj)).into_response();
     }
@@ -2237,7 +2253,10 @@ async fn plan_get_order_status(State(_): State<AppState>, Path(invoice): Path<St
 }
 
 async fn plan_get_usage(headers: HeaderMap) -> Response {
-    let base = plan_admin_base();
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let url = format!("{base}/api/usage");
 
     let auth = headers

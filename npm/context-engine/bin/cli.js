@@ -5,10 +5,10 @@ const { existsSync } = require('fs')
 const path = require('path')
 
 const PLATFORMS = {
-  'linux-x64': 'vibervn-context-engine-linux-x64',
-  'linux-arm64': 'vibervn-context-engine-linux-arm64',
-  'darwin-arm64': 'vibervn-context-engine-darwin-arm64',
-  'win32-x64': 'vibervn-context-engine-win32-x64',
+  'linux-x64': 'context-engine-linux-x64',
+  'linux-arm64': 'context-engine-linux-arm64',
+  'darwin-arm64': 'context-engine-darwin-arm64',
+  'win32-x64': 'context-engine-win32-x64',
 }
 
 const platformKey = `${process.platform}-${process.arch}`
@@ -34,7 +34,7 @@ try {
   console.error(
     `Could not find the binary package "${packageName}".\n` +
     `This usually means it was not installed (e.g., --no-optional was used) or your platform is unsupported.\n` +
-    `Try reinstalling: npm install -g vibervn-context-engine`
+    `Try reinstalling: npm install -g context-engine`
   )
   process.exit(1)
 }
@@ -43,7 +43,7 @@ if (!existsSync(binPath)) {
   console.error(
     `Binary not found at "${binPath}".\n` +
     `The platform package "${packageName}" is installed but the binary is missing.\n` +
-    `Try reinstalling: npm install -g vibervn-context-engine`
+    `Try reinstalling: npm install -g context-engine`
   )
   process.exit(1)
 }
@@ -55,7 +55,7 @@ if (!existsSync(binPath)) {
 // "worker" process per repo. Those workers hold a RocksDB lock AND keep the
 // `context-engine-rs.exe` image open. A worker only self-exits after an idle
 // window (default 300s), so if the router dies but its workers linger, the next
-// `npx vibervn-context-engine@latest` cannot replace the cached binary and npm
+// `npx context-engine@latest` cannot replace the cached binary and npm
 // fails with `EPERM: operation not permitted, unlink ...context-engine-rs.exe`.
 //
 // On Windows there is no real SIGINT to forward: Node's `child.kill('SIGINT')`

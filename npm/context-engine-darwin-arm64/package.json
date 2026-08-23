@@ -1,0 +1,9 @@
+{
+  "name": "context-engine-darwin-arm64",
+  "version": "0.0.0",
+  "description": "context-engine binary for macOS arm64",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin", "README.md"],
+  "engines": { "node": ">=18" }
+}

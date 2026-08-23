@@ -16,16 +16,22 @@ use serde_json::{Value, json};
 use super::RouterState;
 use crate::config::ensure_dir_and_load;
 
-const PLAN_DEFAULT_ADMIN: &str = "https://context-engine.viber.vn";
 const PLAN_PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-fn plan_admin_base() -> String {
+fn plan_gateway_unconfigured() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "plan gateway is not configured" })),
+    )
+        .into_response()
+}
+
+fn plan_admin_base() -> Result<String, Response> {
     std::env::var("CONTEXT_ENGINE_ADMIN_URL")
         .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| PLAN_DEFAULT_ADMIN.to_string())
-        .trim_end_matches('/')
-        .to_string()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(plan_gateway_unconfigured)
 }
 
 fn plan_http_client() -> reqwest::Client {
@@ -60,9 +66,12 @@ async fn machine_id(state: &RouterState) -> Result<String, Response> {
     }
 }
 
-/// Forward a simple GET to the admin gateway and stream the JSON body back.
 async fn proxy_get(path: &str) -> Response {
-    let url = format!("{}{}", plan_admin_base(), path);
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
+    let url = format!("{base}{path}");
     match plan_http_client().get(&url).send().await {
         Ok(res) => passthrough(res).await,
         Err(e) => gateway_unreachable(e),
@@ -90,6 +99,10 @@ async fn passthrough(res: reqwest::Response) -> Response {
 /// On a successful JSON object response, inject `base_url` = `<admin>/v1` so the
 /// UI knows where the issued proxy key points. Mirrors the monolith.
 async fn passthrough_with_base_url(res: reqwest::Response, only_if_completed: bool) -> Response {
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let bytes = res.bytes().await.unwrap_or_default();
     if status.is_success()
@@ -98,7 +111,7 @@ async fn passthrough_with_base_url(res: reqwest::Response, only_if_completed: bo
         let inject =
             !only_if_completed || obj.get("status").and_then(|s| s.as_str()) == Some("COMPLETED");
         if inject {
-            obj["base_url"] = Value::String(format!("{}/v1", plan_admin_base()));
+            obj["base_url"] = Value::String(format!("{base}/v1"));
         }
         return (status, Json(obj)).into_response();
     }
@@ -125,7 +138,11 @@ pub async fn order_status(
     State(_): State<RouterState>,
     AxumPath(invoice): AxumPath<String>,
 ) -> Response {
-    let url = format!("{}/api/orders/{invoice}/status", plan_admin_base());
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
+    let url = format!("{base}/api/orders/{invoice}/status");
     match plan_http_client().get(&url).send().await {
         Ok(res) => passthrough_with_base_url(res, true).await,
         Err(e) => gateway_unreachable(e),
@@ -133,7 +150,11 @@ pub async fn order_status(
 }
 
 pub async fn usage(headers: HeaderMap) -> Response {
-    let url = format!("{}/api/usage", plan_admin_base());
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
+    let url = format!("{base}/api/usage");
     let auth = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -151,17 +172,21 @@ pub async fn usage(headers: HeaderMap) -> Response {
 }
 
 pub async fn checkout(State(state): State<RouterState>, Json(body): Json<Value>) -> Response {
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let mid = match machine_id(&state).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
     let mut body = body;
-    if let Value::Object(ref mut obj) = body {
+    if let Value::Object(obj) = &mut body {
         obj.insert("machine_id".to_string(), Value::String(mid));
     } else {
         body = json!({ "machine_id": mid });
     }
-    let url = format!("{}/api/checkout", plan_admin_base());
+    let url = format!("{base}/api/checkout");
     match plan_http_client()
         .post(&url)
         .header("content-type", "application/json")
@@ -175,11 +200,15 @@ pub async fn checkout(State(state): State<RouterState>, Json(body): Json<Value>)
 }
 
 pub async fn free_trial_claim(State(state): State<RouterState>) -> Response {
+    let base = match plan_admin_base() {
+        Ok(base) => base,
+        Err(response) => return response,
+    };
     let mid = match machine_id(&state).await {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let url = format!("{}/api/free-trial/claim", plan_admin_base());
+    let url = format!("{base}/api/free-trial/claim");
     match plan_http_client()
         .post(&url)
         .header("content-type", "application/json")

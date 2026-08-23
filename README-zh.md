@@ -1,4 +1,4 @@
-# vibervn-context-engine
+# context-engine
 
 [English](README.md) · [Tiếng Việt](README-vi.md) · **中文**
 
@@ -10,21 +10,21 @@
 二进制文件。`@latest` 标签会强制 npx 拉取最新发布版本，而不是复用过期的缓存：
 
 ```bash
-npx vibervn-context-engine@latest
+npx context-engine@latest
 ```
 
 该命令会在 6699 端口启动 HTTP 服务器（Web 界面位于 http://127.0.0.1:6699，
 MCP 端点位于 `/mcp`）。所有 CLI 参数都会转发给二进制文件：
 
 ```bash
-npx vibervn-context-engine@latest --port 8080 --bind 0.0.0.0
+npx context-engine@latest --port 8080 --bind 0.0.0.0
 ```
 
-或者全局安装以获得持久的 `vibervn-context-engine` 命令：
+或者全局安装以获得持久的 `context-engine` 命令：
 
 ```bash
-npm install -g vibervn-context-engine@latest
-vibervn-context-engine --port 6699
+npm install -g context-engine@latest
+context-engine --port 6699
 ```
 
 支持的平台：Linux x64/arm64、macOS arm64、Windows x64。
