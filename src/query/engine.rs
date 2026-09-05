@@ -15,6 +15,7 @@ use crate::llm::LlmClient;
 use crate::path_in_repo;
 use crate::query::find_db_for_file;
 use crate::query::graph_expand::graph_expand;
+use crate::query::lexical::{lexical_candidates, lexical_enabled, rrf_fuse};
 use crate::query::merger::{MergeChunk, merge_chunks};
 use crate::query::reranker;
 
@@ -46,6 +47,14 @@ pub struct CodeResult {
     /// Number of callees.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callees: Option<u32>,
+    /// True when any displayed caller edge is inferred (heuristic, not parsed).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
+    pub callers_inferred: bool,
+    /// True when any displayed callee edge is inferred (heuristic, not parsed).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
+    pub callees_inferred: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -251,7 +260,11 @@ pub(crate) async fn run_query_with_filters_and_mode(
         .await;
     let search_ms = search_start.elapsed().as_millis() as u64;
 
-    if raw_results.is_empty() {
+    // Gate-aware lexical: when enabled, an empty vector set is a fallback
+    // trigger, not an immediate empty. The DB map loads first so the lexical
+    // scan can run; only when BOTH lists are empty is the result genuine.
+    let lexical_on = lexical_enabled();
+    if raw_results.is_empty() && !lexical_on {
         return Ok(QueryResult {
             results: vec![],
             pre_rerank_results: vec![],
@@ -295,6 +308,23 @@ pub(crate) async fn run_query_with_filters_and_mode(
         warming = true;
     }
     let mut base_chunks = fenced.kept;
+    // ── Step 3.4: Lexical fallback + RRF fusion (gated, default off) ──────
+    // Lexical rows arrive fully hydrated (content/symbol from the scan), so
+    // they fuse here BEFORE filters: one `apply_query_filters` pass then sees
+    // the fused set. Note: lexical-only rows carry no `symbol_kind`, so a
+    // `kind:` filter can only match them when the row has no kind to reject
+    // (accepted per plan; kind lives on vector-side rows).
+    if lexical_on {
+        let lexical = lexical_candidates(&db_map, embed_query, repo_filter, top_k).await;
+        if !lexical.is_empty() {
+            base_chunks = rrf_fuse(&base_chunks, &lexical);
+            // Preserve the pre-fusion latency bound: graph expansion loops per
+            // base chunk, and the fused union (2×top_k vector + lexical pool)
+            // can be 2–3× larger. Truncate to the vector search width so the
+            // gated path costs no more expansion work than the primary path.
+            base_chunks.truncate(top_k * 2);
+        }
+    }
     if base_chunks.is_empty() && fenced.dropped > 0 {
         return Ok(QueryResult {
             results: vec![],
@@ -353,8 +383,13 @@ pub(crate) async fn run_query_with_filters_and_mode(
 
     // ── Step 5: Merge ─────────────────────────────────────────────────────
     let merge_start = Instant::now();
-    let merged = merge_chunks(all_chunks, top_k);
+    let mut merged = merge_chunks(all_chunks, top_k);
     let merge_ms = merge_start.elapsed().as_millis() as u64;
+    // Stored DB content feeds the reranker and is the final-output fallback
+    // when the FS read fails — redact it alongside the numbered FS reads.
+    for chunk in &mut merged {
+        chunk.content = crate::query::content_fence::redact_secrets(&chunk.content);
+    }
 
     // Read numbered content from disk ONCE per candidate. Bounded by top_k
     // (merge caps the candidate set), so this is never an unbounded read storm.
@@ -448,6 +483,8 @@ pub(crate) async fn run_query_with_filters_and_mode(
         let (callers, caller_files) = stats.map_or((None, None), |s| {
             (Some(s.caller_count), Some(s.caller_file_count))
         });
+        let callers_inferred = stats.is_some_and(|s| s.callers_inferred);
+        let callees_inferred = stats.is_some_and(|s| s.callees_inferred);
         let caller_names = stats.map(|s| s.caller_names.clone()).unwrap_or_default();
         let callee_names = stats.map(|s| s.callee_names.clone()).unwrap_or_default();
         let callees = stats.map(|s| s.callee_count);
@@ -471,6 +508,8 @@ pub(crate) async fn run_query_with_filters_and_mode(
                         caller_names: caller_names.clone(),
                         callee_names: callee_names.clone(),
                         callees,
+                        callers_inferred,
+                        callees_inferred,
                     });
                 }
             }
@@ -486,6 +525,8 @@ pub(crate) async fn run_query_with_filters_and_mode(
                 caller_names: caller_names.clone(),
                 callee_names: callee_names.clone(),
                 callees,
+                callers_inferred,
+                callees_inferred,
             }),
             (None, _) => results.push(CodeResult {
                 file: chunk.file.clone(),
@@ -499,6 +540,8 @@ pub(crate) async fn run_query_with_filters_and_mode(
                 caller_names: caller_names.clone(),
                 callee_names: callee_names.clone(),
                 callees,
+                callers_inferred,
+                callees_inferred,
             }),
         }
     }
@@ -532,6 +575,8 @@ pub(crate) async fn run_query_with_filters_and_mode(
             caller_names: stats.map(|s| s.caller_names.clone()).unwrap_or_default(),
             callee_names: stats.map(|s| s.callee_names.clone()).unwrap_or_default(),
             callees: stats.map(|s| s.callee_count),
+            callers_inferred: stats.is_some_and(|s| s.callers_inferred),
+            callees_inferred: stats.is_some_and(|s| s.callees_inferred),
         });
     }
 
@@ -601,7 +646,8 @@ pub(crate) async fn run_sub_query(
             &current_identity,
         )
         .await;
-    if raw_results.is_empty() {
+    let lexical_on = lexical_enabled();
+    if raw_results.is_empty() && !lexical_on {
         return Ok(vec![]);
     }
 
@@ -616,7 +662,16 @@ pub(crate) async fn run_sub_query(
         guard.clone()
     };
 
-    let base_chunks = hydrate_candidates(&db_map, &filtered).await.kept;
+    let mut base_chunks = hydrate_candidates(&db_map, &filtered).await.kept;
+    // Same gated fusion as the primary funnel: RRF orders, source scores
+    // survive, lexical-only fills the vector-miss fallback.
+    if lexical_on {
+        let lexical = lexical_candidates(&db_map, query, Some(repo_filter), top_k).await;
+        if !lexical.is_empty() {
+            base_chunks = rrf_fuse(&base_chunks, &lexical);
+            base_chunks.truncate(top_k * 2);
+        }
+    }
 
     let schema_version = if graph_mode.uses_call_graph() {
         Some(if let Some(db) = db_map.values().next() {
@@ -784,8 +839,11 @@ pub struct CallerCalleeStats {
     pub caller_names: Vec<String>,
     pub callee_count: u32,
     pub callee_file_count: u32,
-    /// Short names of callees, sorted by proximity.
     pub callee_names: Vec<String>,
+    /// True when any displayed caller edge is inferred (confidence < 1.0).
+    pub callers_inferred: bool,
+    /// True when any displayed callee edge is inferred (confidence < 1.0).
+    pub callees_inferred: bool,
 }
 
 /// Legacy type alias for backward compatibility with reranker which uses (count, file_count).
@@ -823,6 +881,9 @@ struct CallerRow {
     in_file: String,
     #[serde(default)]
     in_name: Option<String>,
+    /// NULL = parser-extracted (weight 1.0); Some(p) = inferred.
+    #[serde(default)]
+    confidence: Option<f32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -830,9 +891,12 @@ struct CalleeRow {
     out_file: String,
     #[serde(default)]
     out_name: Option<String>,
+    /// NULL = parser-extracted (weight 1.0); Some(p) = inferred.
+    #[serde(default)]
+    confidence: Option<f32>,
 }
 
-async fn query_caller_callee_stats(
+pub(crate) async fn query_caller_callee_stats(
     db: &Surreal<Db>,
     fqn: &str,
     target_file: &str,
@@ -840,7 +904,7 @@ async fn query_caller_callee_stats(
 ) -> Option<CallerCalleeStats> {
     // Fetch callers (who calls this symbol)
     let caller_rows: Vec<CallerRow> = if schema_version >= 2 {
-        db.query("SELECT in_file, in_name FROM calls WHERE out_name = $fqn")
+        db.query("SELECT in_file, in_name, confidence FROM calls WHERE out_name = $fqn")
             .bind(("fqn", fqn.to_string()))
             .await
             .ok()?
@@ -848,7 +912,7 @@ async fn query_caller_callee_stats(
             .ok()?
     } else {
         let name = fqn.rsplit("::").next().unwrap_or(fqn);
-        db.query("SELECT in_file, in_name FROM calls WHERE out_name = $name")
+        db.query("SELECT in_file, in_name, confidence FROM calls WHERE out_name = $name")
             .bind(("name", name.to_string()))
             .await
             .ok()?
@@ -870,6 +934,12 @@ async fn query_caller_callee_stats(
         caller_rows.iter().map(|r| r.in_file.as_str()).collect();
     let caller_file_count = distinct_caller_files.len() as u32;
 
+    // Any DISPLAYED caller edge inferred? NULL = extracted = not inferred.
+    // Computed over the named rows feeding the tags, so the flag matches MCP.
+    let callers_inferred = caller_rows
+        .iter()
+        .any(|r| r.confidence.is_some_and(|c| c < 1.0));
+
     // Extract and sort caller names by proximity
     let caller_names = proximity_sorted_names(
         &caller_rows
@@ -881,7 +951,7 @@ async fn query_caller_callee_stats(
 
     // Fetch callees (what this symbol calls)
     let callee_rows: Vec<CalleeRow> = if schema_version >= 2 {
-        db.query("SELECT out_file, out_name FROM calls WHERE in_name = $fqn")
+        db.query("SELECT out_file, out_name, confidence FROM calls WHERE in_name = $fqn")
             .bind(("fqn", fqn.to_string()))
             .await
             .ok()?
@@ -890,7 +960,7 @@ async fn query_caller_callee_stats(
     } else {
         // Pre-schema-2 fallback: use short name
         let name = fqn.rsplit("::").next().unwrap_or(fqn);
-        db.query("SELECT out_file, out_name FROM calls WHERE in_name = $name")
+        db.query("SELECT out_file, out_name, confidence FROM calls WHERE in_name = $name")
             .bind(("name", name.to_string()))
             .await
             .ok()?
@@ -906,6 +976,10 @@ async fn query_caller_callee_stats(
         .collect();
 
     let callee_count = callee_rows.len() as u32;
+    let callees_inferred = callee_rows
+        .iter()
+        .any(|r| r.confidence.is_some_and(|c| c < 1.0));
+
     let distinct_callee_files: HashSet<&str> =
         callee_rows.iter().map(|r| r.out_file.as_str()).collect();
     let callee_file_count = distinct_callee_files.len() as u32;
@@ -925,6 +999,8 @@ async fn query_caller_callee_stats(
         callee_count,
         callee_file_count,
         callee_names,
+        callers_inferred,
+        callees_inferred,
     })
 }
 
@@ -978,14 +1054,20 @@ pub fn format_caller_tag(stats: &CallerCalleeStats) -> String {
     let remaining = stats
         .caller_count
         .saturating_sub(display_names.len() as u32);
+    let suffix = if stats.callers_inferred {
+        " ~inferred"
+    } else {
+        ""
+    };
     if remaining > 0 {
         format!(
-            " [callers: {} +{} more]",
+            " [callers: {} +{} more{}]",
             display_names.join(", "),
-            remaining
+            remaining,
+            suffix
         )
     } else {
-        format!(" [callers: {}]", display_names.join(", "))
+        format!(" [callers: {}{}]", display_names.join(", "), suffix)
     }
 }
 
@@ -1001,10 +1083,20 @@ pub fn format_callee_tag(stats: &CallerCalleeStats) -> String {
     let remaining = stats
         .callee_count
         .saturating_sub(display_names.len() as u32);
-    if remaining > 0 {
-        format!(" [calls: {} +{} more]", display_names.join(", "), remaining)
+    let suffix = if stats.callees_inferred {
+        " ~inferred"
     } else {
-        format!(" [calls: {}]", display_names.join(", "))
+        ""
+    };
+    if remaining > 0 {
+        format!(
+            " [calls: {} +{} more{}]",
+            display_names.join(", "),
+            remaining,
+            suffix
+        )
+    } else {
+        format!(" [calls: {}{}]", display_names.join(", "), suffix)
     }
 }
 
@@ -1138,7 +1230,10 @@ pub(crate) fn read_lines_from_fs(file: &str, line_start: u32, line_end: u32) -> 
         .map(|(i, line)| format!("{}: {}", start_idx + i + 1, line))
         .collect::<Vec<_>>()
         .join("\n");
-    Ok(numbered)
+    // Fence: this text feeds the rerank LLM payload and the final output on
+    // every query path, so credential-shaped material is redacted here, once,
+    // before it can reach either.
+    Ok(crate::query::content_fence::redact_secrets(&numbered))
 }
 
 /// Slice an already-numbered chunk text (produced by `read_lines_from_fs`,
@@ -1256,6 +1351,8 @@ mod tests {
             callee_count: 0,
             callee_file_count: 0,
             callee_names: vec![],
+            callers_inferred: false,
+            callees_inferred: false,
         };
         assert_eq!(format_caller_tag(&stats), "");
     }
@@ -1270,6 +1367,8 @@ mod tests {
             callee_count: 0,
             callee_file_count: 0,
             callee_names: vec![],
+            callers_inferred: false,
+            callees_inferred: false,
         };
         assert_eq!(format_caller_tag(&stats), " [callers: fn_a, fn_b]");
     }
@@ -1284,6 +1383,8 @@ mod tests {
             callee_count: 0,
             callee_file_count: 0,
             callee_names: vec![],
+            callers_inferred: false,
+            callees_inferred: false,
         };
         // Shows first 30, then "+5 more"
         let tag = format_caller_tag(&stats);
@@ -1301,6 +1402,8 @@ mod tests {
             callee_count: 0,
             callee_file_count: 0,
             callee_names: vec![],
+            callers_inferred: false,
+            callees_inferred: false,
         };
         assert_eq!(format_callee_tag(&stats), "");
     }
@@ -1315,6 +1418,8 @@ mod tests {
             callee_count: 35,
             callee_file_count: 8,
             callee_names: (1..=35).map(|i| format!("call_{i}")).collect(),
+            callers_inferred: false,
+            callees_inferred: false,
         };
         let tag = format_callee_tag(&stats);
         assert!(tag.starts_with(" [calls: call_1, call_2, call_3"));
@@ -1331,7 +1436,44 @@ mod tests {
             callee_count: 3,
             callee_file_count: 2,
             callee_names: vec!["foo".into(), "bar".into(), "baz".into()],
+            callers_inferred: false,
+            callees_inferred: false,
         };
         assert_eq!(format_callee_tag(&stats), " [calls: foo, bar, baz]");
+    }
+
+    #[test]
+    fn caller_tag_inferred_suffix() {
+        use super::{CallerCalleeStats, format_caller_tag};
+        let stats = CallerCalleeStats {
+            caller_count: 2,
+            caller_file_count: 1,
+            caller_names: vec!["fn_a".into(), "fn_b".into()],
+            callee_count: 0,
+            callee_file_count: 0,
+            callee_names: vec![],
+            callers_inferred: true,
+            callees_inferred: false,
+        };
+        assert_eq!(
+            format_caller_tag(&stats),
+            " [callers: fn_a, fn_b ~inferred]"
+        );
+    }
+
+    #[test]
+    fn callee_tag_inferred_suffix() {
+        use super::{CallerCalleeStats, format_callee_tag};
+        let stats = CallerCalleeStats {
+            caller_count: 0,
+            caller_file_count: 0,
+            caller_names: vec![],
+            callee_count: 1,
+            callee_file_count: 1,
+            callee_names: vec!["fn_c".into()],
+            callers_inferred: false,
+            callees_inferred: true,
+        };
+        assert_eq!(format_callee_tag(&stats), " [calls: fn_c ~inferred]");
     }
 }

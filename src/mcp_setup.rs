@@ -71,6 +71,62 @@ impl Target {
             _ => None,
         }
     }
+
+    /// Lowercase CLI/display name (`Target::parse` round-trips with this).
+    pub fn name(self) -> &'static str {
+        match self {
+            Target::Claude => "claude",
+            Target::Codex => "codex",
+            Target::Opencode => "opencode",
+        }
+    }
+
+    /// Every target, in the order `--tool all` expands to.
+    pub const ALL: [Target; 3] = [Target::Claude, Target::Codex, Target::Opencode];
+}
+
+/// Parse a CLI `--tool` spec: `all` (case-insensitive) or a comma-separated
+/// list of target names. Duplicates collapse, first-seen order preserved.
+/// Returns a human-readable error listing valid values — the CLI prints it
+/// verbatim, so the wording doubles as usage help.
+pub fn parse_tool_list(spec: &str) -> Result<Vec<Target>, String> {
+    const VALID: &str = "claude, codex, opencode, all";
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(format!("empty tool list (valid: {VALID})"));
+    }
+    if spec.eq_ignore_ascii_case("all") {
+        return Ok(Target::ALL.to_vec());
+    }
+    let mut out: Vec<Target> = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(format!("empty tool name in \"{spec}\" (valid: {VALID})"));
+        }
+        let target = Target::parse(part)
+            .ok_or_else(|| format!("unknown tool \"{part}\" (valid: {VALID})"))?;
+        if !out.contains(&target) {
+            out.push(target);
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("no tool selected (valid: {VALID})"));
+    }
+    Ok(out)
+}
+
+/// Build the per-repo MCP endpoint URL the CLI writes into agent configs:
+/// `http://<bind>:<port>/mcp-repo/<sanitize_repo_name(repo)>` — the same shape
+/// the Web UI builds from the browser origin for `run_setup` (see
+/// `post_mcp_setup` in server.rs). An explicitly provided origin replaces only
+/// the scheme/host part; the path always stays this repo's own endpoint.
+pub fn build_endpoint_url(origin: &str, repo: &str) -> String {
+    format!(
+        "{}/mcp-repo/{}",
+        origin.trim_end_matches('/'),
+        crate::store::sanitize_repo_name(repo)
+    )
 }
 
 // ─── Per-file action result (surfaced to the UI) ───────────────────────────
@@ -92,6 +148,12 @@ impl FileStatus {
             FileStatus::Unchanged => "unchanged",
             FileStatus::Error => "error",
         }
+    }
+}
+
+impl std::fmt::Display for FileStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -935,6 +997,57 @@ mod tests {
         run_setup(dir.path(), Target::Codex, URL, &both_tools()); // creates AGENTS.md
         let actions = run_setup(dir.path(), Target::Codex, URL, &both_tools());
         assert_eq!(status_of(&actions, "AGENTS.md"), FileStatus::Unchanged);
+    }
+
+    // ── CLI spec parsing + URL building ─────────────────────────────────
+
+    #[test]
+    fn tool_list_all_expands_to_every_target() {
+        assert_eq!(
+            parse_tool_list("all").unwrap(),
+            vec![Target::Claude, Target::Codex, Target::Opencode]
+        );
+        // Case-insensitive: it is a CLI flag value.
+        assert_eq!(parse_tool_list("ALL").unwrap(), Target::ALL.to_vec());
+    }
+
+    #[test]
+    fn tool_list_parses_dedups_and_preserves_order() {
+        assert_eq!(
+            parse_tool_list("codex, claude ,codex").unwrap(),
+            vec![Target::Codex, Target::Claude]
+        );
+        // Target::parse is exact-lowercase; mixed case names are invalid.
+        assert!(parse_tool_list("Claude").is_err());
+    }
+
+    #[test]
+    fn tool_list_errors_name_the_valid_values() {
+        for bad in ["", "   ", "bogus", "claude,,codex"] {
+            let err = parse_tool_list(bad).unwrap_err();
+            assert!(
+                err.contains("claude, codex, opencode, all"),
+                "error for {bad:?} must double as usage help: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_url_matches_the_ui_built_shape() {
+        // Same shape as the tests' const URL and `post_mcp_setup`'s
+        // expected_suffix `/mcp-repo/<sanitize_repo_name(repo)>`.
+        assert_eq!(
+            build_endpoint_url("http://localhost:6699", "d:\\repo"),
+            "http://localhost:6699/mcp-repo/d__repo"
+        );
+        // Trailing slash on an explicit origin is trimmed, not doubled.
+        assert_eq!(
+            build_endpoint_url("http://127.0.0.1:6699/", "/Users/x/demo"),
+            format!(
+                "http://127.0.0.1:6699/mcp-repo/{}",
+                crate::store::sanitize_repo_name("/Users/x/demo")
+            )
+        );
     }
 
     // ── Path safety ─────────────────────────────────────────────────────

@@ -9,7 +9,7 @@
 //! measured first.
 //!
 //! These tests are `#[ignore]` because they depend on machine-local on-disk
-//! indexes under `~/.vibervn/context-engine/rocksdb/`. Run explicitly:
+//! indexes under `~/.context-engine/rocksdb/`. Run explicitly:
 //!
 //! ```text
 //! cargo test --test measure_cold_open -- --ignored --nocapture
@@ -25,12 +25,11 @@ use std::time::Instant;
 
 use context_engine_rs::{engine_boot, store};
 
-/// Resolve `~/.vibervn/context-engine` the same way the engine does at boot.
+/// Resolve `~/.context-engine` the same way the engine does at boot.
 fn data_dir() -> PathBuf {
     dirs::home_dir()
         .expect("home dir")
-        .join(".vibervn")
-        .join("context-engine")
+        .join(".context-engine")
 }
 
 /// Time a single cold `open_db` for `repo_path` at `generation`, returning the

@@ -881,12 +881,13 @@ async fn run_agentic_loop<B: AgenticBackend>(
                             // shared char budget + iteration cap.
                             awaiting_query = false;
                             let root = backend.repo_root().expect("checked above");
-                            let content = run_grep_tool(
-                                &root,
-                                &call.args,
-                                &mut extended_chunks,
-                                &mut extended_numbered,
-                            );
+                            let content =
+                                crate::query::content_fence::redact_secrets(&run_grep_tool(
+                                    &root,
+                                    &call.args,
+                                    &mut extended_chunks,
+                                    &mut extended_numbered,
+                                ));
                             tool_results.push(ToolResult {
                                 name: "grep".to_owned(),
                                 id: call.id.clone(),
@@ -896,12 +897,13 @@ async fn run_agentic_loop<B: AgenticBackend>(
                         "read" => {
                             awaiting_query = false;
                             let root = backend.repo_root().expect("checked above");
-                            let content = run_read_tool(
-                                &root,
-                                &call.args,
-                                &mut extended_chunks,
-                                &mut extended_numbered,
-                            );
+                            let content =
+                                crate::query::content_fence::redact_secrets(&run_read_tool(
+                                    &root,
+                                    &call.args,
+                                    &mut extended_chunks,
+                                    &mut extended_numbered,
+                                ));
                             tool_results.push(ToolResult {
                                 name: "read".to_owned(),
                                 id: call.id.clone(),

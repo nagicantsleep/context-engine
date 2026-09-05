@@ -12,7 +12,6 @@ use crate::query::cross_repo::{CrossRepoResolver, RemoteChunkData};
 use crate::query::find_db_for_file;
 use crate::query::merger::MergeChunk;
 
-
 /// An expanded chunk produced by BFS graph traversal.
 pub struct ExpandedChunk {
     pub file: String,
@@ -562,7 +561,10 @@ async fn fetch_endpoint_chunk(
     cross: Option<&CrossRepoResolver>,
     cross_budget: &AtomicUsize,
 ) -> Option<ExpandedChunk> {
-    if let Some((_, db)) = db_map.iter().find(|(repo, _)| path_in_repo(endpoint_file, repo)) {
+    if let Some((_, db)) = db_map
+        .iter()
+        .find(|(repo, _)| path_in_repo(endpoint_file, repo))
+    {
         return fetch_chunk_for_fqn(db, fqn, score, base_keys).await;
     }
     let Some(resolver) = cross else {
@@ -950,7 +952,9 @@ mod tests {
         format!("http://{addr}")
     }
 
-    async fn seed_caller_with_foreign_edge(home: &TempDir) -> HashMap<String, surrealdb::Surreal<surrealdb::engine::local::Db>> {
+    async fn seed_caller_with_foreign_edge(
+        home: &TempDir,
+    ) -> HashMap<String, surrealdb::Surreal<surrealdb::engine::local::Db>> {
         let db_a = open_db(home.path(), "/repo/a", 0).await.unwrap();
         insert_symbol(&db_a, "/repo/a/a.rs::a", "/repo/a/a.rs", "a", 1, 5).await;
         insert_call(
@@ -990,7 +994,10 @@ mod tests {
             .expect("foreign callee must be expanded via the router callback");
         assert_eq!(hit.content, "fn b() {}");
         assert_eq!(hit.symbol_fqn.as_deref(), Some("/repo/b/b.rs::b"));
-        assert!((hit.score - 0.5).abs() < f32::EPSILON, "callee factor × extracted weight");
+        assert!(
+            (hit.score - 0.5).abs() < f32::EPSILON,
+            "callee factor × extracted weight"
+        );
     }
 
     #[tokio::test]

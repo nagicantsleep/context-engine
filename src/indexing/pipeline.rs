@@ -1440,7 +1440,8 @@ impl IndexPipeline {
         }
         // Symbol sidecar refresh LAST — it must describe the now-durable state
         // (changed chunks/edges + identity marker all committed above).
-        self.refresh_symbol_sidecar_incremental(db, &to_process, &to_delete).await;
+        self.refresh_symbol_sidecar_incremental(db, &to_process, &to_delete)
+            .await;
 
         Ok((run_stats, vi_apply_ms))
     }
@@ -2994,7 +2995,9 @@ impl IndexPipeline {
                 deleted = deleted_files.len(),
                 "symbol sidecar refreshed incrementally"
             ),
-            Err(e) => warn!(repo = %self.repo, error = %e, "incremental symbol sidecar write failed"),
+            Err(e) => {
+                warn!(repo = %self.repo, error = %e, "incremental symbol sidecar write failed")
+            }
         }
     }
 
@@ -3806,7 +3809,6 @@ fn strip_id_brackets_phase2(id: &str) -> String {
         .to_string()
 }
 
-
 /// Merge foreign repos' SYMBOL SIDECAR entries into an existing fqn-keyed map.
 /// Existing keys win — live-DB symbols always outrank sidecar copies.
 fn merge_foreign_sidecars_into(
@@ -3828,15 +3830,15 @@ fn merge_foreign_sidecars_into(
     }
     let added = map.len() - before;
     if added > 0 {
-        debug!(foreign_added = added, "phase2: merged foreign symbol sidecars");
+        debug!(
+            foreign_added = added,
+            "phase2: merged foreign symbol sidecars"
+        );
     }
 }
 
 /// Load current symbols of `files` (targeted indexed query — O(files)).
-async fn load_symbols_for_files(
-    db: &Surreal<Db>,
-    files: &[String],
-) -> Result<Vec<SymbolWithPos>> {
+async fn load_symbols_for_files(db: &Surreal<Db>, files: &[String]) -> Result<Vec<SymbolWithPos>> {
     #[derive(serde::Deserialize)]
     struct Row {
         fqn: String,
@@ -8576,7 +8578,7 @@ mod mmap_warm_microbench {
 // ground truth for a probe set, then measures i8 recall@10 / recall@30 + score drift.
 // GATE: recall@10 >= 0.98. Below that → pivot to mmap fallback, do NOT ship i8.
 //
-// Runs against the production data dir by default (~/.vibervn/context-engine), repo
+// Runs against the production data dir by default (~/.context-engine), repo
 // chosen via env. #[ignore]d — run explicitly:
 //   RECALL_REPO='c:/users/0x317/downloads/linux' \
 //     cargo test --release --lib recall_gate_i8_vs_f32 -- --ignored --nocapture
@@ -8592,12 +8594,7 @@ mod recall_gate {
             .expect("set RECALL_REPO to a repo path that is already indexed");
         let data_dir = std::env::var("RECALL_DATA_DIR")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                dirs::home_dir()
-                    .unwrap()
-                    .join(".vibervn")
-                    .join("context-engine")
-            });
+            .unwrap_or_else(|_| dirs::home_dir().unwrap().join(".context-engine"));
         let n_probes: usize = std::env::var("RECALL_PROBES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -9652,7 +9649,8 @@ mod reviewed_edge_regressions {
         let calls = test_calls(&db_a).await;
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(
-            calls[0].1, format!("{repo_b}/z.rs"),
+            calls[0].1,
+            format!("{repo_b}/z.rs"),
             "edge must resolve to the SIDE CAR-provided foreign candidate"
         );
         assert_eq!(calls[0].3, format!("{repo_b}/z.rs::foo"));

@@ -1433,6 +1433,8 @@ async fn post_mcp_tool(State(state): State<AppState>, Json(req): Json<McpToolReq
         &req.information_request,
         &req.workspace_full_path,
         state.cross_repo.as_ref(),
+        // REST parity: no caller budget; built-in 48K cap applies.
+        None,
     )
     .await;
     Json(json!({ "result": result })).into_response()
@@ -1462,6 +1464,8 @@ async fn post_file_retrieval(
         &req.file_path,
         &req.information_request,
         req.top_k.unwrap_or(5),
+        // REST parity: no caller budget; built-in 48K cap applies.
+        None,
     )
     .await;
     Json(json!({ "result": result })).into_response()

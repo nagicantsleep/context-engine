@@ -520,6 +520,8 @@ async fn run_tool(
                 // cross-repo resolver is threaded only through the primary
                 // query funnels (documented limitation).
                 None,
+                // Chat has no caller token budget; built-in 48K cap applies.
+                None,
             )
             .await;
             let ok = !out.starts_with("Error:");
@@ -545,6 +547,8 @@ async fn run_tool(
                 file_path,
                 req,
                 5,
+                // Chat has no caller token budget; built-in 48K cap applies.
+                None,
             )
             .await;
             let ok = !out.starts_with("Error:");
