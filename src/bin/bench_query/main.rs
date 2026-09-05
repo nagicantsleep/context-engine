@@ -10,7 +10,7 @@
 //! raw, no-rerank query) and as a one-shot query tool for users.
 //!
 //! It defaults to the SHARED real data dir (env > settings > the builtin
-//! `~/.vibervn/context-engine`), exactly like the server. RocksDB takes an
+//! `~/.context-engine`), exactly like the server. RocksDB takes an
 //! exclusive per-directory lock, so it CANNOT run against the same data dir as a
 //! live server — that conflict surfaces on first DB open during index/query and
 //! is reported with clear guidance (stop the server or pass `--data-dir`).
@@ -54,7 +54,7 @@ struct Cli {
 
     /// Data directory base override. Defaults to the SAME precedence as the
     /// server (env CONTEXT_ENGINE_DATA_DIR > Settings.data_dir > builtin
-    /// `~/.vibervn/context-engine`) — i.e. the REAL shared index, intentionally,
+    /// `~/.context-engine`) — i.e. the REAL shared index, intentionally,
     /// so the CLI queries the index the server built. Pass a separate dir to run
     /// alongside a live server (RocksDB's exclusive per-dir lock forbids sharing).
     #[arg(long)]

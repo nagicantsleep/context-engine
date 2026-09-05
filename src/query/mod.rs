@@ -3,8 +3,10 @@ pub mod cross_repo;
 pub mod engine;
 pub mod filters;
 pub mod graph_expand;
+pub mod lexical;
 pub mod merger;
 pub mod reranker;
+pub mod trace_path;
 
 pub use engine::{CodeResult, QueryResult, QueryTiming, RerankInfo, run_query};
 

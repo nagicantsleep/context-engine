@@ -57,10 +57,9 @@ pub async fn run(cli: &Cli, bind: &str, repo: String) {
         // Cross-repo BFS expansion (router callback) + strict single-repo
         // ownership scope. Without --router-url the worker still serves its
         // own repo; only foreign-repo expansion is disabled.
-        cli
-            .router_url
-            .as_deref()
-            .map(|url| context_engine_rs::query::cross_repo::CrossRepoResolver::new(url.to_owned())),
+        cli.router_url.as_deref().map(|url| {
+            context_engine_rs::query::cross_repo::CrossRepoResolver::new(url.to_owned())
+        }),
         Some(context_engine_rs::store::normalize_repo_path(&repo)),
     );
     let app = router::worker::with_idle_tracking(app, idle.clone());

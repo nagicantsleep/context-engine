@@ -157,7 +157,7 @@ async fn insert_with_duplicate_id_merges_instead_of_failing() {
     );
 }
 
-/// Accuracy guard for the real ~/.vibervn DB after a notepad-ade rebuild.
+/// Accuracy guard for the real ~/.context-engine DB after a notepad-ade rebuild.
 /// Asserts symbols + the calls graph actually persisted (this is exactly the state
 /// the silent-empty-symbol bug left at 0). Run after a warm-cache rebuild:
 ///   cargo test --release --test repro_notepad count_real_db_rows -- --ignored --nocapture
@@ -167,10 +167,10 @@ async fn count_real_db_rows() {
     let repo = "D:/projects/Cpp/notepad-ade".to_string();
     let home_dir = dirs::home_dir().expect("home dir");
     // Diagnostic against the real on-disk index — its base is the builtin
-    // default data dir (`~/.vibervn/context-engine`). Constructed locally so
+    // default data dir (`~/.context-engine`). Constructed locally so
     // the test continues to inspect the real index regardless of any
     // `Settings.data_dir` override (this binary is NOT booting the server).
-    let data_dir = home_dir.join(".vibervn").join("context-engine");
+    let data_dir = home_dir.join(".context-engine");
     let db = open_db(&data_dir, &repo, 0).await.expect("open real db");
 
     #[derive(serde::Deserialize)]
@@ -269,10 +269,10 @@ async fn repro_full_rebuild_notepad_ade_fresh_db() {
     }
 }
 
-/// Diagnostic test: inspect the real ~/.vibervn calls indexes and repair any
+/// Diagnostic test: inspect the real ~/.context-engine calls indexes and repair any
 /// incomplete/missing ones synchronously.
 ///
-/// WRITES TO THE REAL ~/.vibervn INDEX — do NOT run as part of normal CI.
+/// WRITES TO THE REAL ~/.context-engine INDEX — do NOT run as part of normal CI.
 /// Run explicitly with:
 ///   cargo test --release --test repro_notepad inspect_real_calls_indexes -- --ignored --nocapture
 ///
@@ -301,11 +301,10 @@ async fn inspect_real_calls_indexes() {
 
     let home_dir = dirs::home_dir().expect("dirs::home_dir() must return a value on this platform");
     // Real-data-dir base for diagnostic open_db; matches builtin default.
-    let data_dir = home_dir.join(".vibervn").join("context-engine");
+    let data_dir = home_dir.join(".context-engine");
 
     let surreal_dir = home_dir
-        .join(".vibervn")
-        .join("context-engine")
+        .join(".context-engine")
         .join("surreal")
         .join("D__projects_Cpp_notepad_ade");
     if !surreal_dir.exists() {
@@ -438,13 +437,13 @@ async fn inspect_real_calls_indexes() {
 
 /// Warm-cache full-rebuild benchmark.
 ///
-/// WRITES TO THE REAL ~/.vibervn INDEX — do NOT run as part of normal CI.
+/// WRITES TO THE REAL ~/.context-engine INDEX — do NOT run as part of normal CI.
 /// Run explicitly with:
 ///   cargo test --release --test repro_notepad repro_full_rebuild_notepad_ade_warm_cache -- --ignored --nocapture
 ///
 /// Prerequisites:
 ///   1. The source repo D:/projects/Cpp/notepad-ade must be present.
-///   2. The embedding cache dir ~/.vibervn/context-engine/embeddings/voyage-4-lite must exist
+///   2. The embedding cache dir ~/.context-engine/embeddings/voyage-4-lite must exist
 ///      (delete the surreal DB first to force a real full rebuild; the cache survives).
 ///
 /// What it measures: the complete production path including cache-READ time for ~53K .bin files.
@@ -468,7 +467,7 @@ async fn repro_full_rebuild_notepad_ade_warm_cache() {
 
     let home_dir = dirs::home_dir().expect("dirs::home_dir() must return a value on this platform");
     // Real-data-dir base for diagnostic open_db / EmbeddingCache; matches builtin default.
-    let data_dir = home_dir.join(".vibervn").join("context-engine");
+    let data_dir = home_dir.join(".context-engine");
 
     // Guard: confirm the embedding cache exists (otherwise the test would just benchmark
     // empty-embedding writes, not the warm-cache-read path the user cares about).
@@ -491,7 +490,7 @@ async fn repro_full_rebuild_notepad_ade_warm_cache() {
         }
     };
 
-    // Open (or create) the real SurrealDB at ~/.vibervn/context-engine/rocksdb/…
+    // Open (or create) the real SurrealDB at ~/.context-engine/rocksdb/…
     // Note: the rocksdb dir should be deleted before running this test so the
     // rebuild is genuinely forced from scratch, but open_db handles both cases.
     let db = open_db(&data_dir, &repo, 0)

@@ -294,7 +294,6 @@ pub fn load_foreign_symbol_sidecars(data_dir: &Path, own_repo: &str) -> Vec<Symb
 
 const SYMBOLS_AUX_KIND: &str = "symbols";
 
-
 /// Remove ALL of a repo's sidecar files (meta + graph + files). Called on repo /
 /// index removal so the router's cold view doesn't keep serving stale data for a
 /// repo whose index was just deleted. Best-effort: a file that isn't there (or
@@ -388,7 +387,13 @@ mod tests {
             repo,
             vec![
                 sym("/repo/writer/z.rs::zed", "/repo/writer/z.rs", "zed", 1, 5),
-                sym("/repo/writer/a.rs::alpha", "/repo/writer/a.rs", "alpha", 10, 20),
+                sym(
+                    "/repo/writer/a.rs::alpha",
+                    "/repo/writer/a.rs",
+                    "alpha",
+                    10,
+                    20,
+                ),
                 sym("/repo/writer/a.rs::beta", "/repo/writer/a.rs", "beta", 1, 5),
             ],
         )
@@ -408,8 +413,12 @@ mod tests {
     fn foreign_loader_skips_own_and_corrupt() {
         let dir = TempDir::new().unwrap();
         let own = "/repo/self";
-        write_symbol_sidecar(dir.path(), own, vec![sym("/repo/self/a.rs::a", "/repo/self/a.rs", "a", 1, 2)])
-            .unwrap();
+        write_symbol_sidecar(
+            dir.path(),
+            own,
+            vec![sym("/repo/self/a.rs::a", "/repo/self/a.rs", "a", 1, 2)],
+        )
+        .unwrap();
         write_symbol_sidecar(
             dir.path(),
             "/repo/other",
@@ -417,7 +426,11 @@ mod tests {
         )
         .unwrap();
         // Corrupt a third repo's payload — loader must skip it silently.
-        std::fs::write(aux_path(dir.path(), "/repo/broken", SYMBOLS_AUX_KIND), b"{nope").unwrap();
+        std::fs::write(
+            aux_path(dir.path(), "/repo/broken", SYMBOLS_AUX_KIND),
+            b"{nope",
+        )
+        .unwrap();
 
         let mut loaded = load_foreign_symbol_sidecars(dir.path(), own);
         assert_eq!(loaded.len(), 1, "own repo and corrupt payloads are skipped");
@@ -431,8 +444,18 @@ mod tests {
     fn remove_all_clears_symbols_payload() {
         let dir = TempDir::new().unwrap();
         let repo = "/repo/gone";
-        write_symbol_sidecar(dir.path(), repo, vec![sym(format!("{repo}/a.rs::a").as_str(), format!("{repo}/a.rs").as_str(), "a", 1, 2)])
-            .unwrap();
+        write_symbol_sidecar(
+            dir.path(),
+            repo,
+            vec![sym(
+                format!("{repo}/a.rs::a").as_str(),
+                format!("{repo}/a.rs").as_str(),
+                "a",
+                1,
+                2,
+            )],
+        )
+        .unwrap();
         assert!(read_symbol_sidecar(dir.path(), repo).is_some());
         remove_all_sidecars(dir.path(), repo);
         assert!(

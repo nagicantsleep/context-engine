@@ -986,7 +986,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-
     /// version 0 is invalid — ensure_dir_and_load must return MigrationFailed,
     /// not panic (debug) or silently wrap-around (release).
     #[test]

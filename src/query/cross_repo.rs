@@ -89,7 +89,10 @@ mod tests {
         // Port 1 is reserved (unroutable) — connection refused/error fast.
         let resolver = CrossRepoResolver::new("http://127.0.0.1:1".to_string());
         assert!(
-            resolver.fetch_chunk("/repo/b/b.rs::b", "/repo/b/b.rs").await.is_none(),
+            resolver
+                .fetch_chunk("/repo/b/b.rs::b", "/repo/b/b.rs")
+                .await
+                .is_none(),
             "unreachable router must degrade to None, never panic"
         );
     }

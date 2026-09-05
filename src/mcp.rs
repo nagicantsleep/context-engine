@@ -38,7 +38,18 @@ use crate::store;
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 48_000;
 const MAX_FIRST_LINE_CHARS: usize = 120;
+/// chars→tokens heuristic (×4, the standard estimate for code/English).
+/// Documented approximation, not a tokenizer: keeps agents' budgets honest
+/// without pulling a tokenizer dependency into the binary.
+pub const CHARS_PER_TOKEN: usize = 4;
 
+/// Estimated tokens for `text` under the [`CHARS_PER_TOKEN`] heuristic.
+/// `char` count (not bytes): CJK/emoji-heavy content counts closer to 1
+/// token/char, so this is a lower bound for such text — conservative in the
+/// safe direction for budget display (never promises fewer tokens than sent).
+pub fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(CHARS_PER_TOKEN)
+}
 /// A single result block ready for budget-aware assembly.
 #[derive(Default)]
 struct OutputBlock {
@@ -52,17 +63,24 @@ struct OutputBlock {
     caller_names: Vec<String>,
     callee_names: Vec<String>,
     callees: Option<u32>,
+    callers_inferred: bool,
+    callees_inferred: bool,
 }
 
 /// Assemble result blocks into a single string respecting `MAX_TOOL_OUTPUT_CHARS`.
-///
-/// Results are in priority order (reranked). Full content is emitted until the
-/// budget would be exceeded; from that point, all remaining blocks are shown as
-/// header + first line (capped at 120 chars) + elision marker.
-fn assemble_with_budget(blocks: &[OutputBlock]) -> String {
-    // Reserve space for the footer so it's never squeezed out.
-    const FOOTER_RESERVE: usize = 150;
-    let effective_budget = MAX_TOOL_OUTPUT_CHARS - FOOTER_RESERVE;
+/// `max_tokens`: optional caller cap. Converted to chars (×[`CHARS_PER_TOKEN`])
+/// and intersected with the built-in char budget — the tighter bound wins, so
+/// omitting it (`None`) preserves today's 48K behavior exactly.
+fn assemble_with_budget(blocks: &[OutputBlock], max_tokens: Option<usize>) -> String {
+    // Reserve space for the footers so they're never squeezed out: the
+    // truncation notice (~130 chars) plus the token estimate line (~35).
+    const FOOTER_RESERVE: usize = 200;
+    let mut effective_budget = MAX_TOOL_OUTPUT_CHARS - FOOTER_RESERVE;
+    if let Some(t) = max_tokens {
+        // 0 disables? No — 0 means "no usable budget": clamp to footer so the
+        // output is just the truncation notice, never a panic on underflow.
+        effective_budget = effective_budget.min(t.saturating_mul(CHARS_PER_TOKEN));
+    }
 
     let mut out = String::new();
     let mut truncated_count = 0usize;
@@ -128,6 +146,11 @@ fn assemble_with_budget(blocks: &[OutputBlock]) -> String {
         );
         out.push_str(&footer);
     }
+
+    // Token estimate: always emitted so agents can budget follow-ups. Counts
+    // the body BEFORE this line (self-exclusion keeps the number stable).
+    let tokens = estimate_tokens(&out);
+    out.push_str(&format!("\n\n---\n~{tokens} tokens (est. chars/4)"));
 
     out
 }
@@ -198,10 +221,16 @@ fn merge_overlapping_blocks(blocks: Vec<OutputBlock>) -> Vec<OutputBlock> {
                         current.callers = next.callers;
                         current.caller_files = next.caller_files;
                         current.caller_names = std::mem::take(&mut next.caller_names);
+                        current.callers_inferred = next.callers_inferred;
+                    } else {
+                        current.callers_inferred |= next.callers_inferred;
                     }
                     if next.callees.unwrap_or(0) > current.callees.unwrap_or(0) {
                         current.callees = next.callees;
                         current.callee_names = std::mem::take(&mut next.callee_names);
+                        current.callees_inferred = next.callees_inferred;
+                    } else {
+                        current.callees_inferred |= next.callees_inferred;
                     }
                     originals.push(next.content);
                 } else {
@@ -232,9 +261,17 @@ fn merge_overlapping_blocks(blocks: Vec<OutputBlock>) -> Vec<OutputBlock> {
                 }
             }
             // Rebuild header with updated range + enriched caller/callee tags.
-            let caller_tag =
-                format_enriched_caller_tag(block.callers, &block.caller_names, block.caller_files);
-            let callee_tag = format_enriched_callee_tag(block.callees, &block.callee_names);
+            let caller_tag = format_enriched_caller_tag(
+                block.callers,
+                &block.caller_names,
+                block.caller_files,
+                block.callers_inferred,
+            );
+            let callee_tag = format_enriched_callee_tag(
+                block.callees,
+                &block.callee_names,
+                block.callees_inferred,
+            );
             block.header = format!(
                 "{}#L{}-{}{}{}",
                 block.file, block.line_start, block.line_end, caller_tag, callee_tag
@@ -289,6 +326,10 @@ pub struct CodebaseRetrievalArgs {
     /// Optional: filter results to files matching this path substring.
     #[serde(default)]
     pub filter_path: Option<String>,
+    /// Optional: cap the response at ~this many tokens (chars/4 heuristic,
+    /// intersected with the 48K char budget — tighter bound wins).
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -301,6 +342,90 @@ pub struct FileRetrievalArgs {
     pub information_request: String,
     /// Number of top-scoring snippets to return. Defaults to 5.
     pub top_k: Option<usize>,
+    /// Optional: cap the response at ~this many tokens (chars/4 heuristic,
+    /// intersected with the 48K char budget — tighter bound wins).
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TracePathArgs {
+    /// Absolute path to the repository root.
+    pub workspace_full_path: String,
+    /// Symbol the path starts from: full FQN (`/abs/file.rs::mod::name`),
+    /// `file.rs::name`, `::name`, or a bare symbol name. Ambiguous references
+    /// return the candidate list instead of guessing.
+    pub from_symbol: String,
+    /// Symbol the path must reach (same accepted forms as `from_symbol`).
+    pub to_symbol: String,
+    /// Which edges to follow from `from_symbol`: `callees` (how execution gets
+    /// from `from_symbol` to `to_symbol`, default) or `callers` (the chain by
+    /// which `from_symbol` is reached from `to_symbol`).
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// Maximum call-graph edges per path. Defaults to 5, capped at 10.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoTracePathArgs {
+    /// Symbol the path starts from: full FQN (`/abs/file.rs::mod::name`),
+    /// `file.rs::name`, `::name`, or a bare symbol name. Ambiguous references
+    /// return the candidate list instead of guessing.
+    pub from_symbol: String,
+    /// Symbol the path must reach (same accepted forms as `from_symbol`).
+    pub to_symbol: String,
+    /// Which edges to follow from `from_symbol`: `callees` (default) or `callers`.
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// Maximum call-graph edges per path. Defaults to 5, capped at 10.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SymbolContextArgs {
+    /// Absolute path to the repository root.
+    pub workspace_full_path: String,
+    /// Symbol to describe: full FQN (`/abs/file.rs::mod::name`), `file.rs::name`,
+    /// `::name`, or a bare symbol name. Ambiguous references return the
+    /// candidate list instead of guessing.
+    pub symbol: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoSymbolContextArgs {
+    /// Symbol to describe: full FQN (`/abs/file.rs::mod::name`), `file.rs::name`,
+    /// `::name`, or a bare symbol name. Ambiguous references return the
+    /// candidate list instead of guessing.
+    pub symbol: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ImpactArgs {
+    /// Absolute path to the repository root.
+    pub workspace_full_path: String,
+    /// Symbol to analyze: full FQN (`/abs/file.rs::mod::name`), `file.rs::name`,
+    /// `::name`, or a bare symbol name. Ambiguous references return the
+    /// candidate list instead of guessing.
+    pub symbol: String,
+    /// How many caller levels to walk (1 = direct callers only). Defaults to
+    /// 3, capped at 8.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoImpactArgs {
+    /// Symbol to analyze: full FQN (`/abs/file.rs::mod::name`), `file.rs::name`,
+    /// `::name`, or a bare symbol name. Ambiguous references return the
+    /// candidate list instead of guessing.
+    pub symbol: String,
+    /// How many caller levels to walk (1 = direct callers only). Defaults to
+    /// 3, capped at 8.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
 }
 
 // ─── MCP handler ─────────────────────────────────────────────────────────
@@ -308,7 +433,7 @@ pub struct FileRetrievalArgs {
 #[derive(Clone)]
 pub struct McpHandler {
     /// Used ONLY for `settings.json` access (config_path / ensure_dir_and_load).
-    /// settings.json's location is fixed at `~/.vibervn/context-engine/settings.json`.
+    /// settings.json's location is fixed at `~/.context-engine/settings.json`.
     home_dir: PathBuf,
     /// Boot-resolved data directory (CLI > env > `Settings.data_dir` > builtin
     /// default). Used for store/embedding paths. Captured once at startup —
@@ -335,7 +460,17 @@ impl McpHandler {
         enabled_tools: &[String],
         cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
     ) -> Self {
-        let all_tools: &[&str] = &["codebase-retrieval", "file-retrieval"];
+        let all_tools: &[&str] = &[
+            "codebase-retrieval",
+            "file-retrieval",
+            "trace-path",
+            "symbol-context",
+            "impact",
+        ];
+        // `list_repos` is deliberately absent from this gate: it is always
+        // exposed (see run_list_repos) — hiding discovery behind the same
+        // opt-in list as the retrieval tools would make default settings
+        // undiscoverable.
         let mut router = Self::tool_router();
         for &name in all_tools {
             if !enabled_tools.iter().any(|e| e == name) {
@@ -351,6 +486,97 @@ impl McpHandler {
             cross_repo,
             tool_router: router,
         }
+    }
+
+    /// Discover the repositories this engine can query (read-only).
+    ///
+    /// Lists every configured repo path with its durable index state (read
+    /// from sidecars — never spawns a worker or triggers indexing) and the
+    /// sanitized per-repo endpoint name. Use a returned path as
+    /// `workspace_full_path` on the retrieval tools.
+    #[tool(name = "list_repos", annotations(read_only_hint = true))]
+    async fn list_repos(&self) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let text = run_list_repos(&settings, &self.data_dir, None);
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    /// Trace a call path between two symbols (read-only).
+    ///
+    /// Resolves both references against the repo's symbol table (full FQN,
+    /// `file.rs::name`, `::name`, or bare name — ambiguous references return
+    /// the candidate list) and walks the repo's `calls` graph depth-bounded in
+    /// the requested `direction`. Paths are ordered chains of fully-qualified
+    /// symbols; `~inferred` marks heuristic edges. Edges owned by this repo's
+    /// database only — a path that would cross into another repo ends there.
+    #[tool(name = "trace-path")]
+    async fn trace_path(
+        &self,
+        Parameters(args): Parameters<TracePathArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let repo = store::normalize_repo_path(&args.workspace_full_path);
+        let text = run_trace_path(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &repo,
+            &args.from_symbol,
+            &args.to_symbol,
+            args.direction.as_deref(),
+            args.max_depth,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    /// Show one symbol's definition source and call-graph context (read-only).
+    ///
+    /// Resolves the reference (same accepted forms as `trace-path`), then
+    /// returns the numbered definition source (secret-fenced, truncated at
+    /// 200 lines) plus caller/callee counts and proximity-sorted names — the
+    /// same enriched tags the retrieval tools emit.
+    #[tool(name = "symbol-context")]
+    async fn symbol_context(
+        &self,
+        Parameters(args): Parameters<SymbolContextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let repo = store::normalize_repo_path(&args.workspace_full_path);
+        let text = run_symbol_context(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &repo,
+            &args.symbol,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    /// Analyze what is affected by changing a symbol (read-only).
+    ///
+    /// Walks the repo's `calls` graph BACKWARD from the symbol, BFS-grouped by
+    /// hop distance (level 1 = direct callers), with a most-affected-files
+    /// summary. Edges owned by this repo's database only. Same accepted symbol
+    /// reference forms as `trace-path`.
+    #[tool(name = "impact")]
+    async fn impact(
+        &self,
+        Parameters(args): Parameters<ImpactArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let repo = store::normalize_repo_path(&args.workspace_full_path);
+        let text = run_impact(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &repo,
+            &args.symbol,
+            args.max_depth,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[doc = include_str!("prompts/mcp_codebase_retrieval.txt")]
@@ -377,6 +603,7 @@ impl McpHandler {
             &augmented_query,
             &args.workspace_full_path,
             self.cross_repo.as_ref(),
+            args.max_tokens,
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -397,6 +624,7 @@ impl McpHandler {
             &args.file_path,
             &args.information_request,
             args.top_k.unwrap_or(5),
+            args.max_tokens,
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -458,7 +686,15 @@ impl RepoMcpHandler {
         enabled_tools: &[String],
         cross_repo: Option<crate::query::cross_repo::CrossRepoResolver>,
     ) -> Self {
-        let all_tools: &[&str] = &["codebase-retrieval", "file-retrieval"];
+        let all_tools: &[&str] = &[
+            "codebase-retrieval",
+            "file-retrieval",
+            "trace-path",
+            "symbol-context",
+            "impact",
+        ];
+        // Same deliberate omission of `list_repos` from the gate as the global
+        // handler — see run_list_repos.
         let mut router = Self::tool_router();
         for &name in all_tools {
             if !enabled_tools.iter().any(|e| e == name) {
@@ -477,6 +713,85 @@ impl RepoMcpHandler {
         }
     }
 
+    /// Discover the repositories this engine can query (read-only).
+    ///
+    /// Same listing as the global handler's `list_repos`, with the endpoint's
+    /// pre-bound workspace marked. Reading state only — never triggers
+    /// indexing.
+    #[tool(name = "list_repos", annotations(read_only_hint = true))]
+    async fn list_repos(&self) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let text = run_list_repos(&settings, &self.data_dir, Some(&self.repo_path));
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    /// Trace a call path between two symbols in this repo (read-only).
+    ///
+    /// Same tracing as the global handler's `trace-path`, with this endpoint's
+    /// workspace pre-bound — no `workspace_full_path` argument.
+    #[tool(name = "trace-path")]
+    async fn trace_path(
+        &self,
+        Parameters(args): Parameters<RepoTracePathArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let text = run_trace_path(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &self.repo_path,
+            &args.from_symbol,
+            &args.to_symbol,
+            args.direction.as_deref(),
+            args.max_depth,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    /// Show one symbol's definition source and call-graph context (read-only).
+    ///
+    /// Same as the global handler's `symbol-context`, with this endpoint's
+    /// workspace pre-bound — no `workspace_full_path` argument.
+    #[tool(name = "symbol-context")]
+    async fn symbol_context(
+        &self,
+        Parameters(args): Parameters<RepoSymbolContextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let text = run_symbol_context(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &self.repo_path,
+            &args.symbol,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    /// Analyze what is affected by changing a symbol in this repo (read-only).
+    ///
+    /// Same reverse call-graph analysis as the global handler's `impact`, with
+    /// this endpoint's workspace pre-bound — no `workspace_full_path` argument.
+    #[tool(name = "impact")]
+    async fn impact(
+        &self,
+        Parameters(args): Parameters<RepoImpactArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let text = run_impact(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &self.repo_path,
+            &args.symbol,
+            args.max_depth,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[doc = include_str!("prompts/mcp_codebase_retrieval.txt")]
     #[tool(name = "codebase-retrieval")]
     async fn codebase_retrieval(
@@ -493,6 +808,7 @@ impl RepoMcpHandler {
             &args.information_request,
             &self.repo_path,
             self.cross_repo.as_ref(),
+            None,
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -513,6 +829,7 @@ impl RepoMcpHandler {
             &args.file_path,
             &args.information_request,
             args.top_k.unwrap_or(5),
+            None,
         )
         .await;
         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -573,6 +890,63 @@ fn select_empty_or_warming_message(
     format!("No results found for: {information_request}")
 }
 
+/// Shared read-only repo discovery behind the `list_repos` MCP tool (used by
+/// both the global and per-repo handlers). Reads ONLY the settings snapshot
+/// passed in plus durable sidecars — it never registers a repo, spawns a
+/// worker, or triggers indexing, so it is safe on the cold global `/mcp` route.
+///
+/// `this_repo` (per-repo endpoint) marks which entry is the pre-bound
+/// workspace. `list_repos` is intentionally NOT gated by `enabled_mcp_tools`
+/// (unlike the retrieval tools): it is the discovery surface that makes the
+/// gated tools usable under default settings, and it exposes nothing the
+/// router does not already serve through read-only routes.
+fn run_list_repos(settings: &Settings, data_dir: &Path, this_repo: Option<&str>) -> String {
+    let repos = &settings.repos;
+    if repos.is_empty() {
+        return "No repos configured yet. A repo is added automatically the first \
+               time `codebase-retrieval` is called with its full path, or via the \
+               Web UI settings.\n"
+            .to_string();
+    }
+
+    let mut out = format!(
+        "{} configured repo{}; enabled MCP tools: {}\n",
+        repos.len(),
+        if repos.len() == 1 { "" } else { "s" },
+        settings.enabled_mcp_tools.join(", "),
+    );
+
+    for (i, repo) in repos.iter().enumerate() {
+        out.push_str(&format!("\n{}. {}\n", i + 1, repo));
+        if Some(repo.as_str()) == this_repo {
+            out.push_str("   this workspace (workspace_full_path is pre-bound here)\n");
+        }
+        out.push_str(&format!(
+            "   per-repo MCP endpoint name: {}\n",
+            store::sanitize_repo_name(repo)
+        ));
+        match crate::router::sidecar::read_sidecar(data_dir, repo) {
+            Some(meta) => match meta.last_indexed_at {
+                Some(at) => out.push_str(&format!(
+                    "   index: {} — {} file(s), last indexed {at} (model {})\n",
+                    meta.state, meta.file_count, meta.embedding_model
+                )),
+                None => out.push_str("   index: never indexed (querying it triggers indexing)\n"),
+            },
+            None => {
+                out.push_str("   index: no durable state yet (querying it triggers indexing)\n")
+            }
+        }
+    }
+
+    out.push_str(
+        "\nPass one of these paths as `workspace_full_path`. A query in one repo \
+         can also surface chunks from another when call-graph edges cross the \
+         repo boundary (lazy cross-repo navigation).\n",
+    );
+    out
+}
+
 pub async fn run_codebase_retrieval(
     home_dir: &Path,
     data_dir: &Path,
@@ -582,12 +956,14 @@ pub async fn run_codebase_retrieval(
     information_request: &str,
     workspace_full_path: &str,
     cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
+    max_tokens: Option<usize>,
 ) -> String {
     // 1. Validate workspace_full_path.
     let repo = workspace_full_path.trim();
     if repo.is_empty() {
         return "Error: workspace_full_path is required. Pass the full path to the workspace \
-                (repository) root directory."
+                (repository) root directory. Call `list_repos` to see the workspaces this \
+                engine already knows."
             .to_string();
     }
     let repo = &crate::store::normalize_repo_path(repo);
@@ -597,7 +973,8 @@ pub async fn run_codebase_retrieval(
         // Guard: path must exist and be a directory before we accept it.
         if !std::path::Path::new(repo).is_dir() {
             return format!(
-                "Error: workspace '{}' does not exist or is not a directory.",
+                "Error: workspace '{}' does not exist or is not a directory. \
+                 Call `list_repos` to see configured workspaces.",
                 repo
             );
         }
@@ -669,6 +1046,7 @@ pub async fn run_codebase_retrieval(
         query_graph_mode,
         query_warm_wait,
         cross,
+        max_tokens,
     )
     .await;
     format!("{output_prefix}{output}")
@@ -713,6 +1091,7 @@ fn format_enriched_caller_tag(
     count: Option<u32>,
     names: &[String],
     _file_count: Option<u32>,
+    inferred: bool,
 ) -> String {
     let c = match count {
         Some(c) if c > 0 => c,
@@ -725,20 +1104,22 @@ fn format_enriched_caller_tag(
     let max_display = 30;
     let display_names: Vec<&str> = names.iter().take(max_display).map(|s| s.as_str()).collect();
     let remaining = c.saturating_sub(display_names.len() as u32);
+    let suffix = if inferred { " ~inferred" } else { "" };
     if remaining > 0 {
         format!(
-            " [callers: {} +{} more]",
+            " [callers: {} +{} more{}]",
             display_names.join(", "),
-            remaining
+            remaining,
+            suffix
         )
     } else {
-        format!(" [callers: {}]", display_names.join(", "))
+        format!(" [callers: {}{}]", display_names.join(", "), suffix)
     }
 }
 
 /// Format an enriched callee tag: `[calls: fn_x, fn_y +N more]`
 /// Returns empty string when no callees.
-fn format_enriched_callee_tag(count: Option<u32>, names: &[String]) -> String {
+fn format_enriched_callee_tag(count: Option<u32>, names: &[String], inferred: bool) -> String {
     let c = match count {
         Some(c) if c > 0 => c,
         _ => return String::new(),
@@ -749,11 +1130,323 @@ fn format_enriched_callee_tag(count: Option<u32>, names: &[String]) -> String {
     let max_display = 30;
     let display_names: Vec<&str> = names.iter().take(max_display).map(|s| s.as_str()).collect();
     let remaining = c.saturating_sub(display_names.len() as u32);
+    let suffix = if inferred { " ~inferred" } else { "" };
     if remaining > 0 {
-        format!(" [calls: {} +{} more]", display_names.join(", "), remaining)
+        format!(
+            " [calls: {} +{} more{}]",
+            display_names.join(", "),
+            remaining,
+            suffix
+        )
     } else {
-        format!(" [calls: {}]", display_names.join(", "))
+        format!(" [calls: {}{}]", display_names.join(", "), suffix)
     }
+}
+
+/// Shared `trace-path` runner (global + per-repo handlers): resolve both
+/// symbol references against the repo's symbol table, then depth-bounded DFS
+/// over the repo's own `calls` table. Read-only — the DB is opened through the
+/// same `get_or_open` path as `file-retrieval`; the tool never registers a
+/// repo, spawns a worker, or triggers indexing.
+#[allow(clippy::too_many_arguments)]
+async fn run_trace_path(
+    repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
+    data_dir: &Path,
+    settings: &Settings,
+    repo: &str,
+    from_symbol: &str,
+    to_symbol: &str,
+    direction: Option<&str>,
+    max_depth: Option<usize>,
+) -> String {
+    let direction = match direction {
+        None => crate::query::trace_path::Direction::Callees,
+        Some(d) => match crate::query::trace_path::Direction::parse(d) {
+            Some(d) => d,
+            None => {
+                return format!("Error: unknown direction '{d}' (valid: callees, callers).");
+            }
+        },
+    };
+
+    let db =
+        match store::get_or_open(repo_dbs, data_dir, repo, settings.repo_generation(repo)).await {
+            Ok(d) => d,
+            Err(e) => return format!("Error: could not open index database: {e}"),
+        };
+
+    if store::read_db_schema_version(&db).await < 2 {
+        return "Error: this repo's index predates FQN call edges (schema < 2). \
+                Re-index the repo, then retry."
+            .to_string();
+    }
+
+    let from = match crate::query::trace_path::resolve_unique(&db, from_symbol, "from_symbol").await
+    {
+        Ok(s) => s,
+        Err(e) => return format!("Error: {e}"),
+    };
+    let to = match crate::query::trace_path::resolve_unique(&db, to_symbol, "to_symbol").await {
+        Ok(s) => s,
+        Err(e) => return format!("Error: {e}"),
+    };
+
+    let depth = max_depth
+        .unwrap_or(crate::query::trace_path::DEFAULT_MAX_DEPTH)
+        .clamp(1, crate::query::trace_path::MAX_DEPTH_CAP);
+    let outcome = crate::query::trace_path::trace_paths(
+        &db,
+        &from.fqn,
+        &from.file,
+        &to.fqn,
+        direction,
+        depth,
+        crate::query::trace_path::DEFAULT_MAX_PATHS,
+    )
+    .await;
+
+    if outcome.paths.is_empty() {
+        return format!(
+            "No call path found from `{}` to `{}` within depth {depth} (following {}). \
+             The symbols may be unrelated, or the connecting edges may live in another \
+             repo's database (cross-repo edges are owned by the caller's repo).",
+            from.fqn,
+            to.fqn,
+            direction.label(),
+        );
+    }
+
+    let mut out = format!(
+        "{} call path(s) from `{}` to `{}` (following {}, depth ≤ {depth}):\n",
+        outcome.paths.len(),
+        from.fqn,
+        to.fqn,
+        direction.label(),
+    );
+    for (i, path) in outcome.paths.iter().enumerate() {
+        out.push_str(&format!("\n{}. `{}`\n", i + 1, path[0].fqn));
+        for node in &path[1..] {
+            out.push_str(&format!(
+                "   → `{}`{}\n",
+                node.fqn,
+                if node.inferred { " ~inferred" } else { "" }
+            ));
+        }
+    }
+    if outcome.truncated {
+        out.push_str("\n(search stopped at the path/budget cap — more paths may exist)\n");
+    }
+    out
+}
+
+/// Shared `symbol-context` runner (global + per-repo handlers): one read-only
+/// call that resolves a symbol and returns its definition source (numbered,
+/// secret-fenced through `read_lines_from_fs`) together with its call-graph
+/// context (caller/callee counts + proximity-sorted names — the same enriched
+/// tags retrieval output uses). Opens the DB through the same `get_or_open`
+/// path as `file-retrieval`; never registers a repo or triggers indexing.
+async fn run_symbol_context(
+    repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
+    data_dir: &Path,
+    settings: &Settings,
+    repo: &str,
+    symbol: &str,
+) -> String {
+    let db =
+        match store::get_or_open(repo_dbs, data_dir, repo, settings.repo_generation(repo)).await {
+            Ok(d) => d,
+            Err(e) => return format!("Error: could not open index database: {e}"),
+        };
+    let schema_version = store::read_db_schema_version(&db).await;
+    let sym = match crate::query::trace_path::resolve_unique(&db, symbol, "symbol").await {
+        Ok(s) => s,
+        Err(e) => return format!("Error: {e}"),
+    };
+
+    let stats =
+        crate::query::engine::query_caller_callee_stats(&db, &sym.fqn, &sym.file, schema_version)
+            .await;
+
+    // Definition source, numbered + secret-fenced. An unreadable file degrades
+    // to metadata-only output (the index row stays authoritative for the
+    // range); an oversized definition is truncated with an explicit note.
+    const MAX_DEFINITION_LINES: usize = 200;
+    const MAX_DEFINITION_CHARS: usize = 16_000;
+    let (source, source_note) = match crate::query::engine::read_lines_from_fs(
+        &sym.file,
+        sym.line_start.max(1) as u32,
+        sym.line_end.max(1) as u32,
+    ) {
+        Ok(text) => {
+            let line_count = text.lines().count();
+            if line_count > MAX_DEFINITION_LINES || text.len() > MAX_DEFINITION_CHARS {
+                let mut cut = text
+                    .lines()
+                    .take(MAX_DEFINITION_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if cut.len() > MAX_DEFINITION_CHARS {
+                    let mut end = MAX_DEFINITION_CHARS;
+                    while !cut.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    cut.truncate(end);
+                }
+                (
+                    cut,
+                    format!(
+                        "\n(definition truncated — {line_count} lines indexed; \
+                             use codebase-retrieval or file-retrieval for the full range)"
+                    ),
+                )
+            } else {
+                (text, String::new())
+            }
+        }
+        Err(_) => (
+            String::new(),
+            "\n(definition source could not be read from disk — showing index \
+                 metadata only)"
+                .to_string(),
+        ),
+    };
+
+    let mut out = format!("`{}`", sym.fqn);
+    if sym.kind.as_deref().is_some_and(|k| !k.is_empty()) {
+        out.push_str(&format!(" ({})", sym.kind.as_deref().expect("checked")));
+    }
+    out.push_str(&format!(
+        " — {}:{}-{}\n",
+        sym.file, sym.line_start, sym.line_end
+    ));
+    if !source.is_empty() {
+        out.push_str(&format!("\n{source}\n"));
+    }
+    out.push_str(&source_note);
+    match stats {
+        Some(s) => {
+            let caller_tag = format_enriched_caller_tag(
+                Some(s.caller_count),
+                &s.caller_names,
+                Some(s.caller_file_count),
+                s.callers_inferred,
+            );
+            let callee_tag = format_enriched_callee_tag(
+                Some(s.callee_count),
+                &s.callee_names,
+                s.callees_inferred,
+            );
+            if !caller_tag.is_empty() {
+                out.push_str(&format!("\n{}", caller_tag.trim_start()));
+            }
+            if !callee_tag.is_empty() {
+                out.push_str(&format!("\n{}", callee_tag.trim_start()));
+            }
+        }
+        None => out.push_str("\n(no call-graph edges recorded for this symbol)"),
+    }
+    out
+}
+
+/// Shared `impact` runner (global + per-repo handlers): reverse call-graph
+/// analysis — every symbol that transitively CALLS the target, BFS-grouped by
+/// hop distance. Read-only, repo-local edges only (same scope as trace-path);
+/// output adds a most-affected-files summary for triage.
+async fn run_impact(
+    repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
+    data_dir: &Path,
+    settings: &Settings,
+    repo: &str,
+    symbol: &str,
+    max_depth: Option<usize>,
+) -> String {
+    let db =
+        match store::get_or_open(repo_dbs, data_dir, repo, settings.repo_generation(repo)).await {
+            Ok(d) => d,
+            Err(e) => return format!("Error: could not open index database: {e}"),
+        };
+    if store::read_db_schema_version(&db).await < 2 {
+        return "Error: this repo's index predates FQN call edges (schema < 2). \
+                Re-index the repo, then retry."
+            .to_string();
+    }
+    let sym = match crate::query::trace_path::resolve_unique(&db, symbol, "symbol").await {
+        Ok(s) => s,
+        Err(e) => return format!("Error: {e}"),
+    };
+    let depth = max_depth
+        .unwrap_or(crate::query::trace_path::DEFAULT_IMPACT_DEPTH)
+        .clamp(1, crate::query::trace_path::MAX_IMPACT_DEPTH_CAP);
+    let outcome = crate::query::trace_path::impacted(
+        &db,
+        &sym.fqn,
+        depth,
+        crate::query::trace_path::MAX_IMPACT_NODES,
+    )
+    .await;
+
+    let total: usize = outcome.levels.iter().map(|l| l.len()).sum();
+    if total == 0 {
+        return format!(
+            "No callers recorded for `{}` within {depth} level(s). The symbol may be \
+             unused in this repo, be an entry point, or be called only from another \
+             repo (cross-repo edges are owned by the caller's database).",
+            sym.fqn
+        );
+    }
+
+    let kind_suffix = sym
+        .kind
+        .as_deref()
+        .filter(|k| !k.is_empty())
+        .map(|k| format!(" ({k})"))
+        .unwrap_or_default();
+    let mut out = format!(
+        "Impact for `{}`{kind_suffix} — {total} caller(s) reached within {depth} level(s):",
+        sym.fqn
+    );
+
+    const MAX_LISTED_PER_LEVEL: usize = 40;
+    for (i, level) in outcome.levels.iter().enumerate() {
+        let hop = if i == 0 {
+            "direct caller(s)"
+        } else {
+            "caller(s) through them"
+        };
+        out.push_str(&format!("\n\nlevel {} — {} {hop}:", i + 1, level.len()));
+        for node in level.iter().take(MAX_LISTED_PER_LEVEL) {
+            out.push_str(&format!(
+                "\n  - `{}`{}",
+                node.fqn,
+                if node.inferred { " ~inferred" } else { "" }
+            ));
+        }
+        if level.len() > MAX_LISTED_PER_LEVEL {
+            out.push_str(&format!(
+                "\n  … +{} more at this level",
+                level.len() - MAX_LISTED_PER_LEVEL
+            ));
+        }
+    }
+
+    // Most-affected files: where the churn would land.
+    let mut per_file: HashMap<&str, usize> = HashMap::new();
+    for node in outcome.levels.iter().flatten() {
+        *per_file.entry(node.file.as_str()).or_default() += 1;
+    }
+    let mut files: Vec<(&str, usize)> = per_file.into_iter().collect();
+    files.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let summary: Vec<String> = files
+        .iter()
+        .take(5)
+        .map(|(f, n)| format!("{f} ×{n}"))
+        .collect();
+    out.push_str(&format!("\n\nmost affected files: {}", summary.join(", ")));
+
+    if outcome.truncated {
+        out.push_str("\n(node budget reached — the caller graph continues beyond this listing)");
+    }
+    out
 }
 
 /// Returns a string — never panics, never returns Err.
@@ -771,6 +1464,7 @@ async fn do_query(
     graph_mode: QueryGraphMode,
     warm_wait: Duration,
     cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
+    max_tokens: Option<usize>,
 ) -> String {
     let voyage_client = match VoyageClient::new_for_provider(
         crate::embedding::voyage::Provider::parse(&settings.embedding.provider),
@@ -828,9 +1522,14 @@ async fn do_query(
                 .results
                 .iter()
                 .map(|r| {
-                    let caller_tag =
-                        format_enriched_caller_tag(r.callers, &r.caller_names, r.caller_files);
-                    let callee_tag = format_enriched_callee_tag(r.callees, &r.callee_names);
+                    let caller_tag = format_enriched_caller_tag(
+                        r.callers,
+                        &r.caller_names,
+                        r.caller_files,
+                        r.callers_inferred,
+                    );
+                    let callee_tag =
+                        format_enriched_callee_tag(r.callees, &r.callee_names, r.callees_inferred);
                     OutputBlock {
                         header: format!(
                             "{}#L{}-{}{}{}",
@@ -845,6 +1544,8 @@ async fn do_query(
                         caller_names: r.caller_names.clone(),
                         callee_names: r.callee_names.clone(),
                         callees: r.callees,
+                        callers_inferred: r.callers_inferred,
+                        callees_inferred: r.callees_inferred,
                     }
                 })
                 .collect();
@@ -856,7 +1557,7 @@ async fn do_query(
                 .partition(|b| !crate::parsing::generated::is_generated_file(&b.file));
             let mut blocks = hand_written;
             blocks.extend(generated);
-            let assembled = assemble_with_budget(&blocks);
+            let assembled = assemble_with_budget(&blocks, max_tokens);
             if result.warming {
                 format!("{MCP_PARTIAL_RESULTS_PREFIX}{assembled}")
             } else {
@@ -894,10 +1595,13 @@ pub async fn run_file_retrieval(
     file_path: &str,
     information_request: &str,
     top_k: usize,
+    max_tokens: Option<usize>,
 ) -> String {
     let repo = workspace_full_path.trim();
     if repo.is_empty() {
-        return "Error: workspace_full_path is required.".to_string();
+        return "Error: workspace_full_path is required. Call `list_repos` to see the \
+                workspaces this engine already knows."
+            .to_string();
     }
     let repo = &crate::store::normalize_repo_path(repo);
     let file_path = file_path.trim();
@@ -966,7 +1670,7 @@ pub async fn run_file_retrieval(
     let candidates = &scored[..candidate_count];
 
     // Convert to MergeChunk for reranker compatibility.
-    let merge_chunks: Vec<crate::query::merger::MergeChunk> = candidates
+    let mut merge_chunks: Vec<crate::query::merger::MergeChunk> = candidates
         .iter()
         .map(|(score, c)| crate::query::merger::MergeChunk {
             file: db_key.clone(),
@@ -979,6 +1683,11 @@ pub async fn run_file_retrieval(
             symbol_kind: None,
         })
         .collect();
+    // Stored chunk content is the reranker input and the output fallback —
+    // same secret fence as the engine's numbered FS reads.
+    for chunk in &mut merge_chunks {
+        chunk.content = crate::query::content_fence::redact_secrets(&chunk.content);
+    }
 
     // Read numbered content from disk for accurate reranker input.
     let numbered: Vec<Option<String>> = merge_chunks
@@ -1071,7 +1780,7 @@ pub async fn run_file_retrieval(
     }
 
     let blocks = merge_overlapping_blocks(blocks);
-    let mut out = assemble_with_budget(&blocks);
+    let mut out = assemble_with_budget(&blocks, max_tokens);
     out.push_str(crate::prompts::MCP_FILE_RETRIEVAL_HINT);
 
     out
