@@ -3,6 +3,7 @@
 //! focused on production logic.
 
 use super::*;
+use crate::embedding::voyage::VoyageClient;
 use tempfile::TempDir;
 
 /// Seed `n` chunk rows (each with a non-empty 4-d embedding) into `repo`'s DB,

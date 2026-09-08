@@ -9,7 +9,7 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 
 /// Bump this when a new migration is appended to MIGRATIONS.
-pub const CURRENT_VERSION: u32 = 13;
+pub const CURRENT_VERSION: u32 = 15;
 
 /// Migration function type: transforms a JSON Value from version N to version N+1.
 pub type MigrationFn = fn(Value) -> Result<Value, ConfigError>;
@@ -29,6 +29,8 @@ pub const MIGRATIONS: &[MigrationFn] = &[
     migrate_v10_to_v11,
     migrate_v11_to_v12,
     migrate_v12_to_v13,
+    migrate_v13_to_v14,
+    migrate_v14_to_v15,
 ];
 
 /// v1→v2: introduce `data_dir` (Option<PathBuf>). The body is a no-op stamp —
@@ -200,7 +202,28 @@ fn migrate_v12_to_v13(mut value: Value) -> Result<Value, ConfigError> {
     Ok(value)
 }
 
+/// v13→v14: introduce explicit ONNX model/tokenizer paths.
+fn migrate_v13_to_v14(mut value: Value) -> Result<Value, ConfigError> {
+    if let Value::Object(ref mut obj) = value {
+        if let Some(Value::Object(embedding)) = obj.get_mut("embedding") {
+            embedding.entry("onnx_model_path").or_insert(Value::Null);
+            embedding
+                .entry("onnx_tokenizer_path")
+                .or_insert(Value::Null);
+        }
+    }
+    Ok(value)
+}
+
 // ─── Settings ──────────────────────────────────────────────────────────────
+fn migrate_v14_to_v15(mut value: Value) -> Result<Value, ConfigError> {
+    if let Value::Object(obj) = &mut value
+        && let Some(Value::Object(embedding)) = obj.get_mut("embedding")
+    {
+        embedding.entry("ollama_base_url").or_insert(Value::Null);
+    }
+    Ok(value)
+}
 
 fn default_index_ignore_filenames() -> Vec<String> {
     vec!["CLAUDE.md".to_string(), "AGENTS.md".to_string()]
@@ -217,17 +240,8 @@ fn default_embed_concurrency() -> usize {
 }
 
 fn default_vector_resident_cap_mb() -> usize {
-    // Resident-byte cap for the per-repo sharded vector index, in megabytes.
-    // Total resident embedding bytes across all repo shards are kept at or below
-    // this; least-recently-used non-active repos are evicted when an insert/warm
-    // would exceed it. Cold repos are warmed lazily on query. 0 disables the cap
-    // (unbounded — not recommended). Default 2048 MB (~2 GB).
     2048
 }
-
-/// Default worker idle window (seconds) before a process-per-project worker
-/// self-exits. 5 minutes balances resource reclaim against cold-start frequency
-/// (a respawn pays only the measured 0.6–1.4s cold `open_db`).
 fn default_worker_idle_secs() -> u64 {
     300
 }
@@ -237,28 +251,18 @@ pub struct EmbeddingConfig {
     pub provider: String,
     pub model: String,
     pub api_keys: Vec<String>,
-    /// Per-key concurrency: number of embedding batches in-flight per API key.
-    /// Runtime total in-flight batches = embed_concurrency × api_keys.len().
-    /// Defaults to 64 (network-bound pacing stage; saturates typical gateways).
     #[serde(default = "default_embed_concurrency")]
     pub embed_concurrency: usize,
-    /// Custom embedding endpoint base URL for whichever provider is active.
-    /// The JSON key remains `voyage_base_url` for backward compatibility (only
-    /// one provider is ever active at a time, so a per-provider rename would
-    /// force a migration for zero behavioral gain). `None` / blank → the client
-    /// falls back to the active provider's default endpoint (Voyage or OpenAI).
-    /// Accepts either the base form (`…/v1`) or the full `…/v1/embeddings` URL —
-    /// normalization is centralized in `embedding::voyage::embedding_url`.
     #[serde(default)]
     pub voyage_base_url: Option<String>,
-    /// Optional output dimension for the embedding model. Honored only when
-    /// `provider == "openai"`, where it maps to the `dimensions` request
-    /// parameter for Matryoshka-capable models (`text-embedding-3-*`). `None`
-    /// means the model's native dimension. Ignored for Voyage. A non-default
-    /// value is folded into the embedding cache subdirectory key so vectors of
-    /// differing length never share a `.bin` pool.
+    #[serde(default)]
+    pub ollama_base_url: Option<String>,
     #[serde(default)]
     pub dimensions: Option<u32>,
+    #[serde(default)]
+    pub onnx_model_path: Option<PathBuf>,
+    #[serde(default)]
+    pub onnx_tokenizer_path: Option<PathBuf>,
 }
 
 impl Default for EmbeddingConfig {
@@ -269,7 +273,10 @@ impl Default for EmbeddingConfig {
             api_keys: Vec::new(),
             embed_concurrency: default_embed_concurrency(),
             voyage_base_url: None,
+            ollama_base_url: None,
             dimensions: None,
+            onnx_model_path: None,
+            onnx_tokenizer_path: None,
         }
     }
 }
@@ -278,6 +285,45 @@ fn default_min_prune_lines() -> u32 {
     // Chunks whose line span is below this are never line-pruned by the reranker
     // (kept whole). Pruning a small chunk saves little and risks losing context.
     16
+}
+impl EmbeddingConfig {
+    pub fn validate_for_provider(&self) -> anyhow::Result<()> {
+        match crate::embedding::voyage::Provider::parse(&self.provider)? {
+            crate::embedding::voyage::Provider::Voyage
+            | crate::embedding::voyage::Provider::OpenAI => {
+                if self.api_keys.is_empty() {
+                    anyhow::bail!("embedding provider `{}` requires an API key", self.provider);
+                }
+            }
+            crate::embedding::voyage::Provider::Ollama => {
+                if self.model.trim().is_empty() {
+                    anyhow::bail!("ollama embedding model must not be blank");
+                }
+                if let Some(url) = self.ollama_base_url.as_deref()
+                    && !(url.starts_with("http://") || url.starts_with("https://"))
+                {
+                    anyhow::bail!("ollama_base_url must use http:// or https://");
+                }
+            }
+            crate::embedding::voyage::Provider::Onnx => {
+                let model = self
+                    .onnx_model_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("onnx_model_path is required"))?;
+                let tokenizer = self
+                    .onnx_tokenizer_path
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("onnx_tokenizer_path is required"))?;
+                if !model.is_file() {
+                    anyhow::bail!("ONNX model is not a file: {}", model.display());
+                }
+                if !tokenizer.is_file() {
+                    anyhow::bail!("ONNX tokenizer is not a file: {}", tokenizer.display());
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_use_structured_output() -> bool {
@@ -2157,5 +2203,23 @@ mod tests {
         let mut s2 = reloaded;
         ensure_machine_id(home.path(), &mut s2).expect("second ensure");
         assert_eq!(s2.machine_id.as_deref(), Some(id.as_str()));
+    }
+    #[test]
+    fn v14_to_v15_loads_and_persists_ollama_endpoint_field() {
+        let home = TempDir::new().expect("tempdir");
+        let path = config_path(home.path());
+        fs::create_dir_all(path.parent().unwrap()).expect("create config dir");
+        let raw = serde_json::json!({
+            "version": 14,
+            "repos": [],
+            "embedding": {"provider": "ollama", "model": "nomic-embed-text", "api_keys": []},
+            "llm": {"provider": "google", "rerank_model": "x", "api_keys": []}
+        });
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).expect("write v14 config");
+        let loaded = ensure_dir_and_load(home.path()).expect("load v14 config");
+        assert_eq!(loaded.version, CURRENT_VERSION);
+        assert!(loaded.embedding.ollama_base_url.is_none());
+        let persisted: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(persisted["embedding"]["ollama_base_url"].is_null());
     }
 }

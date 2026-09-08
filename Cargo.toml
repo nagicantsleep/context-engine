@@ -85,6 +85,8 @@ async-stream = "0.3"
 schemars = "1"
 tower-service = "0.3"
 async-trait = "0.1"
+tract-onnx = "0.21"
+tokenizers = "0.21"
 
 # Windows Job Object FFI (router-side worker lifetime guarantee). When the
 # router process dies, the Job Object's kill-on-close limit terminates every

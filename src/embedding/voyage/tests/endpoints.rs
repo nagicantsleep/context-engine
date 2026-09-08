@@ -31,7 +31,7 @@ fn provider_parsing_rejects_unknown_values() {
     assert_eq!(Provider::parse("ollama").unwrap(), Provider::Ollama);
     assert!(Provider::parse("unknown").is_err());
     assert!(Provider::parse("").is_err());
-    assert!(Provider::parse("onnx").is_err());
+    assert_eq!(Provider::parse("onnx").unwrap(), Provider::Onnx);
 }
 
 #[test]

@@ -12,7 +12,12 @@ impl VoyageClient {
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         let texts = vec![text.to_string()];
         if self.inner.provider == super::Provider::Ollama {
-            let key = self.inner.api_keys.first().map(String::as_str).unwrap_or("");
+            let key = self
+                .inner
+                .api_keys
+                .first()
+                .map(String::as_str)
+                .unwrap_or("");
             let mut embeddings = self
                 .try_embed_query_with_key(key, &texts, InputType::Query)
                 .await

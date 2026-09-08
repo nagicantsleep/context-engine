@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Settings;
 use crate::embedding::identity::{EMBEDDING_IDENTITY_KEY, EmbeddingIdentity};
-use crate::embedding::voyage::VoyageClient;
+use crate::embedding::voyage::new_embedding_client;
 use crate::indexing::events::{IndexEvent, IndexEventBus};
 use crate::indexing::pipeline::IndexPipeline;
 use crate::indexing::rebuild_guard::IdentityRebuildGuard;
@@ -1250,12 +1250,19 @@ async fn run_consumer(
             status.phase_total = 0;
         }
 
-        // Voyage/OpenAI require keys; Ollama may use native local authless mode.
-        let key_required = match crate::embedding::voyage::Provider::parse(&settings_ref.embedding.provider) {
-            Ok(crate::embedding::voyage::Provider::Voyage | crate::embedding::voyage::Provider::OpenAI) => true,
-            Ok(crate::embedding::voyage::Provider::Ollama) => false,
-            Err(_) => true,
-        };
+        // Voyage/OpenAI require keys; Ollama and ONNX use local authless mode.
+        let key_required =
+            match crate::embedding::voyage::Provider::parse(&settings_ref.embedding.provider) {
+                Ok(
+                    crate::embedding::voyage::Provider::Voyage
+                    | crate::embedding::voyage::Provider::OpenAI,
+                ) => true,
+                Ok(
+                    crate::embedding::voyage::Provider::Ollama
+                    | crate::embedding::voyage::Provider::Onnx,
+                ) => false,
+                Err(_) => true,
+            };
         let voyage_client = if key_required && settings_ref.embedding.api_keys.is_empty() {
             let msg = format!(
                 "no embedding API keys configured for provider `{}`",
@@ -1269,33 +1276,15 @@ async fn run_consumer(
             s.phase = IndexPhase::Idle;
             s.phase_done = 0;
             s.phase_total = 0;
-            engine_ref.event_bus.emit(IndexEvent::Failed { repo: repo.clone(), error: msg });
+            engine_ref.event_bus.emit(IndexEvent::Failed {
+                repo: repo.clone(),
+                error: msg,
+            });
             engine_ref.identity_rebuild.release(&repo);
             engine_ref.clear_cancel_token(&repo).await;
             continue;
         } else {
-            match VoyageClient::new_for_provider(
-                match crate::embedding::voyage::Provider::parse(&settings_ref.embedding.provider) {
-                    Ok(provider) => provider,
-                    Err(e) => {
-                        let msg = format!("invalid embedding provider: {e}");
-                        error!(repo = %repo, "{}", msg);
-                        let mut statuses = engine_ref.statuses.write().await;
-                        let s = statuses.entry(repo.clone()).or_default();
-                        s.state = IndexState::Error;
-                        s.error = Some(msg.clone());
-                        s.phase = IndexPhase::Idle;
-                        engine_ref.event_bus.emit(IndexEvent::Failed { repo: repo.clone(), error: msg });
-                        engine_ref.identity_rebuild.release(&repo);
-                        engine_ref.clear_cancel_token(&repo).await;
-                        continue;
-                    }
-                },
-                settings_ref.embedding.model.clone(),
-                settings_ref.embedding.api_keys.clone(),
-                settings_ref.embedding.voyage_base_url.as_deref(),
-                settings_ref.embedding.dimensions,
-            ) {
+            match new_embedding_client(&settings_ref.embedding) {
                 Ok(c) => Some(c),
                 Err(e) => {
                     error!(repo = %repo, error = %e, "failed to create voyage client");
@@ -1398,14 +1387,15 @@ async fn run_consumer(
             let configured = settings_ref.embedding.embed_concurrency;
             let embed_concurrency = configured * n_keys;
 
-            // Build the embedding cache — uses the model name (and any non-default
-            // output dimension) from the client so different model/dimension
-            // configurations get isolated cache directories.
+            // Include provider, model, dimensions, and ONNX content fingerprint
+            // in the cache directory key; same model names across providers are
+            // different vector spaces.
             let embed_cache = if let Some(ref client) = voyage_client {
+                let identity = EmbeddingIdentity::from_client(client.as_ref());
                 crate::embedding::cache::EmbeddingCache::new(
                     &engine_ref.embeddings_dir,
-                    client.model(),
-                    client.dimensions(),
+                    &identity.as_key_string(),
+                    None,
                 )
             } else {
                 None

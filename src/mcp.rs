@@ -26,7 +26,7 @@ pub(crate) mod readiness;
 mod tests;
 
 use crate::config::Settings;
-use crate::embedding::voyage::VoyageClient;
+use crate::embedding::voyage::new_embedding_client;
 use crate::indexing::IndexEngine;
 use crate::llm::LlmClient;
 use crate::query::engine::QueryGraphMode;
@@ -1466,16 +1466,7 @@ async fn do_query(
     cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
     max_tokens: Option<usize>,
 ) -> String {
-    let voyage_client = match VoyageClient::new_for_provider(
-        match crate::embedding::voyage::Provider::parse(&settings.embedding.provider) {
-            Ok(provider) => provider,
-            Err(e) => return format!("Error: invalid embedding provider: {e}"),
-        },
-        settings.embedding.model.clone(),
-        settings.embedding.api_keys.clone(),
-        settings.embedding.voyage_base_url.as_deref(),
-        settings.embedding.dimensions,
-    ) {
+    let embedding_client = match new_embedding_client(&settings.embedding) {
         Ok(c) => c,
         Err(e) => return format!("Error: failed to create embedding client: {e}"),
     };
@@ -1486,7 +1477,7 @@ async fn do_query(
         information_request,
         30,
         Some(repo),
-        &voyage_client,
+        embedding_client.as_ref(),
         index_engine,
         repo_dbs,
         settings.llm.rerank_min_prune_lines,
@@ -1615,9 +1606,7 @@ pub async fn run_file_retrieval(
         return "Error: information_request is required.".to_string();
     }
 
-    if settings.embedding.api_keys.is_empty() {
-        return "Error: no embedding API keys configured.".to_string();
-    }
+    // Provider factory below validates provider-specific configuration; Ollama and ONNX need no API key.
 
     // Open DB for this repo.
     let db =
@@ -1633,27 +1622,17 @@ pub async fn run_file_retrieval(
         Ok(c) => c,
         Err(e) => return format!("Error: failed to fetch chunks: {e}"),
     };
-
     if chunks.is_empty() {
         return format!("No indexed chunks found for file: {file_path}");
     }
 
     // Embed the query.
-    let voyage_client = match VoyageClient::new_for_provider(
-        match crate::embedding::voyage::Provider::parse(&settings.embedding.provider) {
-            Ok(provider) => provider,
-            Err(e) => return format!("Error: invalid embedding provider: {e}"),
-        },
-        settings.embedding.model.clone(),
-        settings.embedding.api_keys.clone(),
-        settings.embedding.voyage_base_url.as_deref(),
-        settings.embedding.dimensions,
-    ) {
+    let embedding_client = match new_embedding_client(&settings.embedding) {
         Ok(c) => c,
         Err(e) => return format!("Error: failed to create embedding client: {e}"),
     };
 
-    let query_vec = match voyage_client.embed_query(information_request).await {
+    let query_vec = match embedding_client.embed_query(information_request).await {
         Ok(v) => v,
         Err(e) => return format!("Error: embedding failed: {e}"),
     };

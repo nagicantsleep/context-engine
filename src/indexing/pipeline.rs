@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::embedding::EmbeddingClient;
 use crate::embedding::InputType;
 use crate::embedding::cache::EmbeddingCache;
 use crate::embedding::identity::{EMBEDDING_IDENTITY_KEY, EmbeddingIdentity};
-use crate::embedding::voyage::VoyageClient;
 use crate::indexing::ProgressHandle;
 use crate::indexing::events::{IndexEvent, IndexEventBus};
 use crate::indexing::tracker::{ChangeKind, FileChange, stat_file};
@@ -468,7 +468,7 @@ async fn resolve_raw_edge_page(
 /// Runs the parse → embed → store pipeline for one repo.
 pub struct IndexPipeline {
     repo: String,
-    voyage: Option<VoyageClient>,
+    voyage: Option<std::sync::Arc<dyn EmbeddingClient>>,
     /// Concurrent embedding batches in-flight. Derived from config or api_keys.len()*4.
     embed_concurrency: usize,
     /// Optional file-based embedding cache to avoid redundant Voyage API calls.
@@ -492,13 +492,13 @@ pub struct IndexPipeline {
 }
 
 impl IndexPipeline {
-    pub fn new(repo: String, voyage: Option<VoyageClient>) -> Self {
+    pub fn new(repo: String, voyage: Option<std::sync::Arc<dyn EmbeddingClient>>) -> Self {
         Self::new_with_concurrency(repo, voyage, 4, None)
     }
 
     pub fn new_with_concurrency(
         repo: String,
-        voyage: Option<VoyageClient>,
+        voyage: Option<std::sync::Arc<dyn EmbeddingClient>>,
         embed_concurrency: usize,
         cache: Option<EmbeddingCache>,
     ) -> Self {
@@ -652,7 +652,10 @@ impl IndexPipeline {
         // Snapshot the REAL client used by this run before any tracker/parse/store
         // work. This same snapshot is used for mixed-index gating, resident publish,
         // persisted-shard stamp, and the final commit marker.
-        let run_identity = self.voyage.as_ref().map(EmbeddingIdentity::from_client);
+        let run_identity = self
+            .voyage
+            .as_ref()
+            .map(|client| EmbeddingIdentity::from_client(client.as_ref()));
         let stored_identity = get_meta(db, EMBEDDING_IDENTITY_KEY).await?;
         let identity_forces_rebuild = match (&run_identity, &stored_identity) {
             (Some(current), Some(stored)) => current.as_key_string() != *stored,
@@ -1655,7 +1658,7 @@ impl IndexPipeline {
                                     let key_hint = hints_ref.first().cloned().unwrap_or_default();
                                     let embed_start = Instant::now();
 
-                                    let embed_result = match embed_parsed_file(&pf, voyage_ref.as_ref(), cache_ref.clone()).await {
+                                    let embed_result = match embed_parsed_file(&pf, voyage_ref.as_ref().map(|client| client.as_ref()), cache_ref.clone()).await {
                                         Ok(r) => r,
                                         Err(embed_err) => {
                                             // Classify: transient/retry-exhausted errors are
@@ -4179,7 +4182,7 @@ fn map_get_many_result(
 
 async fn embed_parsed_file(
     pf: &ParsedFile,
-    voyage: Option<&VoyageClient>,
+    voyage: Option<&dyn EmbeddingClient>,
     cache: Option<Arc<EmbeddingCache>>,
 ) -> std::result::Result<EmbedFileResult, EmbedFileError> {
     if pf.chunks.is_empty() {

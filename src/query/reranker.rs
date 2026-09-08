@@ -1,4 +1,4 @@
-use crate::embedding::voyage::VoyageClient;
+use crate::embedding::EmbeddingClient;
 use crate::indexing::IndexEngine;
 use crate::llm::{ChatMessage, LlmClient, ToolDef, ToolResult, ToolTurnResult};
 use crate::query::engine::{QueryGraphMode, read_lines_from_fs, run_sub_query, slice_numbered};
@@ -448,7 +448,7 @@ struct LiveBackend<'a> {
     llm_client: &'a LlmClient,
     prompt_cache_key: Option<String>,
     repo_filter: &'a str,
-    voyage_client: &'a VoyageClient,
+    voyage_client: &'a dyn EmbeddingClient,
     index_engine: &'a Arc<IndexEngine>,
     repo_dbs: &'a Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     warm_wait: std::time::Duration,
@@ -520,7 +520,7 @@ pub async fn rerank_agentic(
     grep_read: bool,
     // Sub-query dependencies (for the `query` tool)
     repo_filter: &str,
-    voyage_client: &VoyageClient,
+    voyage_client: &dyn EmbeddingClient,
     index_engine: &Arc<IndexEngine>,
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     warm_wait: std::time::Duration,

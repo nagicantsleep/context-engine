@@ -91,6 +91,43 @@ Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
 | SSE progress stream | Streams live indexing progress events to the UI |
 | Large-repo scaling | Bounded memory and no O(n²) paths — built for Linux/Chromium-scale codebases |
 
+
+### Embedding providers
+
+The default provider is Voyage. Ollama uses its native HTTP endpoint and does
+not require an API key:
+
+```json
+{
+  "embedding": {
+    "provider": "ollama",
+    "model": "nomic-embed-text",
+    "api_keys": [],
+    "ollama_base_url": "http://127.0.0.1:11434/api/embed"
+  }
+}
+```
+
+ONNX is a local provider. Supply a Sentence-Transformers-compatible ONNX
+encoder and tokenizer outside the repository:
+
+```json
+{
+  "embedding": {
+    "provider": "onnx",
+    "model": "local-sentence-transformer",
+    "api_keys": [],
+    "onnx_model_path": "/models/model.onnx",
+    "onnx_tokenizer_path": "/models/tokenizer.json"
+  }
+}
+```
+
+The ONNX contract uses named `input_ids`, `attention_mask`, and optional
+`token_type_ids`, then attention-mask mean pooling and L2 normalization. Runtime
+validation requires a compatible user-supplied model/tokenizer pair; the
+repository has unit coverage for pooling, validation, and identity fingerprints,
+but no bundled model fixture for end-to-end inference verification.
 ## Supported Languages
 
 Tree-sitter symbol extraction (functions, classes, methods, and call edges) is
