@@ -221,8 +221,49 @@ impl EmbeddingClient for OnnxEmbeddingClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        EmbeddingClient, InputType, OnnxEmbeddingClient, fingerprint_for_bytes, masked_mean_l2,
+    };
+    use base64::Engine;
+    use std::fs;
+    use tempfile::tempdir;
 
+    const MODEL_B64: &str = "CAcSB2ZpeHR1cmU6igMKIAoJaW5wdXRfaWRzEgJmaSIEQ2FzdCoJCgJ0bxgBoAECCiUKDmF0dGVudGlvbl9tYXNrEgJmbSIEQ2FzdCoJCgJ0bxgBoAECCiUKDnRva2VuX3R5cGVfaWRzEgJmdCIEQ2FzdCoJCgJ0bxgBoAECChAKAmZpCgJmbRIBYSIDQWRkCg8KAWEKAmZ0EgFiIgNBZGQKHgoBYhIBdSIJVW5zcXVlZXplKgsKBGF4ZXNAAqABBwojCgF1CgF1EgZvdXRwdXQiBkNvbmNhdCoLCgRheGlzGAKgAQISEXJlb3JkZXJlZF9maXh0dXJlWigKDmF0dGVudGlvbl9tYXNrEhYKFAgHEhAKBxIFYmF0Y2gKBRIDc2VxWigKDnRva2VuX3R5cGVfaWRzEhYKFAgHEhAKBxIFYmF0Y2gKBRIDc2VxWiMKCWlucHV0X2lkcxIWChQIBxIQCgcSBWJhdGNoCgUSA3NlcWIkCgZvdXRwdXQSGgoYCAESFAoHEgViYXRjaAoFEgNzZXEKAggCQgQKABAL";
+    const TOKENIZER_B64: &str = "eyJ2ZXJzaW9uIjogIjEuMCIsICJ0cnVuY2F0aW9uIjogbnVsbCwgInBhZGRpbmciOiBudWxsLCAiYWRkZWRfdG9rZW5zIjogW10sICJub3JtYWxpemVyIjogbnVsbCwgInByZV90b2tlbml6ZXIiOiB7InR5cGUiOiAiV2hpdGVzcGFjZSJ9LCAicG9zdF9wcm9jZXNzb3IiOiBudWxsLCAiZGVjb2RlciI6IG51bGwsICJtb2RlbCI6IHsidHlwZSI6ICJXb3JkTGV2ZWwiLCAidm9jYWIiOiB7IltVTktdIjogMCwgImhlbGxvIjogMSwgIndvcmxkIjogMn0sICJ1bmtfdG9rZW4iOiAiW1VOS10ifX0=";
+
+    /// Covers Cast, Add, Unsqueeze, and Concat; production models may use other operators.
+    #[tokio::test]
+    async fn loads_and_runs_real_reordered_three_input_fixture() {
+        let dir = tempdir().unwrap();
+        let model = dir.path().join("model.onnx");
+        let tokenizer = dir.path().join("tokenizer.json");
+        fs::write(
+            &model,
+            base64::engine::general_purpose::STANDARD
+                .decode(MODEL_B64)
+                .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &tokenizer,
+            base64::engine::general_purpose::STANDARD
+                .decode(TOKENIZER_B64)
+                .unwrap(),
+        )
+        .unwrap();
+        let client = OnnxEmbeddingClient::new(&model, &tokenizer).unwrap();
+        let out = client
+            .embed(&["hello world".into()], InputType::Document)
+            .await
+            .unwrap();
+        assert_eq!(out[0].len(), 2);
+        assert!((out[0][0] - 0.70710677).abs() < 1e-5);
+        assert!((out[0][1] - 0.70710677).abs() < 1e-5);
+        assert!(client.model().ends_with(&fingerprint_for_bytes(
+            &fs::read(&model).unwrap(),
+            &fs::read(&tokenizer).unwrap()
+        )));
+    }
     #[test]
     fn masked_mean_excludes_padding_and_normalizes() {
         let out = masked_mean_l2(
