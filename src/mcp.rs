@@ -1467,7 +1467,10 @@ async fn do_query(
     max_tokens: Option<usize>,
 ) -> String {
     let voyage_client = match VoyageClient::new_for_provider(
-        crate::embedding::voyage::Provider::parse(&settings.embedding.provider),
+        match crate::embedding::voyage::Provider::parse(&settings.embedding.provider) {
+            Ok(provider) => provider,
+            Err(e) => return format!("Error: invalid embedding provider: {e}"),
+        },
         settings.embedding.model.clone(),
         settings.embedding.api_keys.clone(),
         settings.embedding.voyage_base_url.as_deref(),
@@ -1637,7 +1640,10 @@ pub async fn run_file_retrieval(
 
     // Embed the query.
     let voyage_client = match VoyageClient::new_for_provider(
-        crate::embedding::voyage::Provider::parse(&settings.embedding.provider),
+        match crate::embedding::voyage::Provider::parse(&settings.embedding.provider) {
+            Ok(provider) => provider,
+            Err(e) => return format!("Error: invalid embedding provider: {e}"),
+        },
         settings.embedding.model.clone(),
         settings.embedding.api_keys.clone(),
         settings.embedding.voyage_base_url.as_deref(),

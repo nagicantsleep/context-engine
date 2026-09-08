@@ -1250,10 +1250,17 @@ async fn run_consumer(
             status.phase_total = 0;
         }
 
-        // Build embedding client — reject if no keys configured.
-        let voyage_client = if settings_ref.embedding.api_keys.is_empty() {
-            let msg =
-                "no embedding API keys configured — cannot index without embeddings".to_string();
+        // Voyage/OpenAI require keys; Ollama may use native local authless mode.
+        let key_required = match crate::embedding::voyage::Provider::parse(&settings_ref.embedding.provider) {
+            Ok(crate::embedding::voyage::Provider::Voyage | crate::embedding::voyage::Provider::OpenAI) => true,
+            Ok(crate::embedding::voyage::Provider::Ollama) => false,
+            Err(_) => true,
+        };
+        let voyage_client = if key_required && settings_ref.embedding.api_keys.is_empty() {
+            let msg = format!(
+                "no embedding API keys configured for provider `{}`",
+                settings_ref.embedding.provider
+            );
             error!(repo = %repo, "{}", msg);
             let mut statuses = engine_ref.statuses.write().await;
             let s = statuses.entry(repo.clone()).or_default();
@@ -1262,16 +1269,28 @@ async fn run_consumer(
             s.phase = IndexPhase::Idle;
             s.phase_done = 0;
             s.phase_total = 0;
-            engine_ref.event_bus.emit(IndexEvent::Failed {
-                repo: repo.clone(),
-                error: msg,
-            });
+            engine_ref.event_bus.emit(IndexEvent::Failed { repo: repo.clone(), error: msg });
             engine_ref.identity_rebuild.release(&repo);
             engine_ref.clear_cancel_token(&repo).await;
             continue;
         } else {
             match VoyageClient::new_for_provider(
-                crate::embedding::voyage::Provider::parse(&settings_ref.embedding.provider),
+                match crate::embedding::voyage::Provider::parse(&settings_ref.embedding.provider) {
+                    Ok(provider) => provider,
+                    Err(e) => {
+                        let msg = format!("invalid embedding provider: {e}");
+                        error!(repo = %repo, "{}", msg);
+                        let mut statuses = engine_ref.statuses.write().await;
+                        let s = statuses.entry(repo.clone()).or_default();
+                        s.state = IndexState::Error;
+                        s.error = Some(msg.clone());
+                        s.phase = IndexPhase::Idle;
+                        engine_ref.event_bus.emit(IndexEvent::Failed { repo: repo.clone(), error: msg });
+                        engine_ref.identity_rebuild.release(&repo);
+                        engine_ref.clear_cancel_token(&repo).await;
+                        continue;
+                    }
+                },
                 settings_ref.embedding.model.clone(),
                 settings_ref.embedding.api_keys.clone(),
                 settings_ref.embedding.voyage_base_url.as_deref(),

@@ -17,6 +17,7 @@ pub use retry::TransientEmbedExhausted;
 
 const VOYAGE_ENDPOINT: &str = "https://api.voyageai.com/v1/embeddings";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/embeddings";
+const OLLAMA_ENDPOINT: &str = "http://127.0.0.1:11434/api/embed";
 pub const MAX_BATCH_SIZE: usize = 128;
 const MAX_BATCH_BYTES: usize = 1_500_000;
 
@@ -24,21 +25,24 @@ const MAX_BATCH_BYTES: usize = 1_500_000;
 pub enum Provider {
     Voyage,
     OpenAI,
+    Ollama,
 }
 
 impl Provider {
-    pub fn parse(value: &str) -> Self {
+    pub fn parse(value: &str) -> anyhow::Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "openai" => Self::OpenAI,
-            _ => Self::Voyage,
+            "openai" => Ok(Self::OpenAI),
+            "ollama" => Ok(Self::Ollama),
+            "voyage" => Ok(Self::Voyage),
+            other => anyhow::bail!("unsupported embedding provider: {other}"),
         }
     }
 
-    /// Canonical stable name used in persisted embedding identities.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Voyage => "voyage",
             Self::OpenAI => "openai",
+            Self::Ollama => "ollama",
         }
     }
 
@@ -46,21 +50,17 @@ impl Provider {
         match self {
             Self::Voyage => VOYAGE_ENDPOINT,
             Self::OpenAI => OPENAI_ENDPOINT,
+            Self::Ollama => OLLAMA_ENDPOINT,
         }
     }
 }
-
 pub fn embedding_url(provider: Provider, base: Option<&str>) -> String {
     let raw = base.unwrap_or_default().trim();
-    if raw.is_empty() {
-        return provider.default_endpoint().to_owned();
-    }
+    if raw.is_empty() { return provider.default_endpoint().to_owned(); }
     let trimmed = raw.trim_end_matches('/');
-    if trimmed.ends_with("/embeddings") {
-        trimmed.to_owned()
-    } else {
-        format!("{trimmed}/embeddings")
-    }
+    if provider == Provider::Ollama {
+        if trimmed.ends_with("/api/embed") { trimmed.to_owned() } else { format!("{trimmed}/api/embed") }
+    } else if trimmed.ends_with("/embeddings") { trimmed.to_owned() } else { format!("{trimmed}/embeddings") }
 }
 
 /// Backward-compatible URL resolver using the Voyage default endpoint.
@@ -96,17 +96,14 @@ impl VoyageClient {
         base_url: Option<&str>,
         dimensions: Option<u32>,
     ) -> Result<Self> {
-        if api_keys.is_empty() {
+        if api_keys.is_empty() && provider != Provider::Ollama {
             bail!("embedding client requires at least one API key");
         }
         let http = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .context("build reqwest client")?;
-        let query_http = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("build query reqwest client")?;
+            .context("build embedding reqwest client")?;
+        let query_http = http.clone();
         Ok(Self {
             inner: Arc::new(VoyageInner {
                 http,

@@ -180,7 +180,8 @@ pub async fn run_query_op(
     // Build the embedding client through the provider-aware factory so the
     // configured `embedding.provider` (Voyage or OpenAI) is honored.
     let voyage_client = VoyageClient::new_for_provider(
-        crate::embedding::voyage::Provider::parse(&settings.embedding.provider),
+        crate::embedding::voyage::Provider::parse(&settings.embedding.provider)
+            .context("invalid embedding provider")?,
         settings.embedding.model.clone(),
         settings.embedding.api_keys.clone(),
         settings.embedding.voyage_base_url.as_deref(),
