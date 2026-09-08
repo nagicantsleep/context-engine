@@ -70,8 +70,9 @@ ONNX chạy local với model và tokenizer do người dùng cung cấp ngoài 
 
 ONNX yêu cầu input có tên `input_ids`, `attention_mask` và tùy chọn
 `token_type_ids`, sau đó mean pooling theo attention mask và L2 normalization.
-Runtime end-to-end cần cặp model/tokenizer tương thích; repository chưa bundle
-model fixture để xác minh inference thực tế.
+Một fixture chỉ dùng trong test đã xác minh input đảo thứ tự, `token_type_ids`
+tuỳ chọn, pooling, normalization và đường operator `Cast`/`Add`/`Unsqueeze`/`Concat`.
+Fixture không đảm bảo tương thích với mọi ONNX model.
 
 ## Ngôn ngữ được hỗ trợ
 

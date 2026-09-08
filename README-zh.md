@@ -67,8 +67,8 @@ ONNX 在本地运行，model 和 tokenizer 文件必须由用户提供并保存�
 
 ONNX 要求命名输入 `input_ids`、`attention_mask`，以及可选的
 `token_type_ids`，随后执行 attention-mask mean pooling 和 L2 normalization。
-端到端运行需要兼容的 model/tokenizer；仓库没有捆绑 model fixture，因此实际
-inference 仍未完成验证。
+仓库包含仅用于测试的 fixture，已验证输入重排、可选 `token_type_ids`、pooling、
+normalization 以及 `Cast`/`Add`/`Unsqueeze`/`Concat` operator 路径；这不保证兼容所有 ONNX model。
 
 ## 支持的语言
 
