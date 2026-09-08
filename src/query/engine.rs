@@ -8,8 +8,8 @@ use surrealdb::engine::local::Db;
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::embedding::EmbeddingClient;
 use crate::embedding::identity::EmbeddingIdentity;
-use crate::embedding::voyage::VoyageClient;
 use crate::indexing::IndexEngine;
 use crate::llm::LlmClient;
 use crate::path_in_repo;
@@ -128,7 +128,7 @@ pub async fn run_query(
     query: &str,
     top_k: usize,
     repo_filter: Option<&str>,
-    voyage_client: &VoyageClient,
+    voyage_client: &dyn EmbeddingClient,
     index_engine: &Arc<IndexEngine>,
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     min_prune_lines: u32,
@@ -165,7 +165,7 @@ pub async fn run_query_with_filters(
     query: &str,
     top_k: usize,
     repo_filter: Option<&str>,
-    voyage_client: &VoyageClient,
+    voyage_client: &dyn EmbeddingClient,
     index_engine: &Arc<IndexEngine>,
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     min_prune_lines: u32,
@@ -203,7 +203,7 @@ pub(crate) async fn run_query_with_filters_and_mode(
     query: &str,
     top_k: usize,
     repo_filter: Option<&str>,
-    voyage_client: &VoyageClient,
+    voyage_client: &dyn EmbeddingClient,
     index_engine: &Arc<IndexEngine>,
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     min_prune_lines: u32,
@@ -618,7 +618,7 @@ pub(crate) async fn run_sub_query(
     query: &str,
     top_k: usize,
     repo_filter: &str,
-    voyage_client: &VoyageClient,
+    voyage_client: &dyn EmbeddingClient,
     index_engine: &Arc<IndexEngine>,
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     warm_wait: std::time::Duration,

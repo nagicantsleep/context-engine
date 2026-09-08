@@ -54,6 +54,25 @@ Nền tảng được hỗ trợ: Linux x64/arm64, macOS arm64, Windows x64.
 | SSE progress stream | Truyền sự kiện indexing progress trực tiếp tới UI |
 | Large-repo scaling | Bounded memory và không có đường O(n²) — xây dựng cho codebase quy mô Linux/Chromium |
 
+### Nhà cung cấp embedding
+
+Voyage là mặc định. Ollama dùng endpoint HTTP native và không bắt buộc API key:
+
+```json
+{"embedding":{"provider":"ollama","model":"nomic-embed-text","api_keys":[],"ollama_base_url":"http://127.0.0.1:11434/api/embed"}}
+```
+
+ONNX chạy local với model và tokenizer do người dùng cung cấp ngoài repository:
+
+```json
+{"embedding":{"provider":"onnx","model":"local-sentence-transformer","api_keys":[],"onnx_model_path":"/models/model.onnx","onnx_tokenizer_path":"/models/tokenizer.json"}}
+```
+
+ONNX yêu cầu input có tên `input_ids`, `attention_mask` và tùy chọn
+`token_type_ids`, sau đó mean pooling theo attention mask và L2 normalization.
+Runtime end-to-end cần cặp model/tokenizer tương thích; repository chưa bundle
+model fixture để xác minh inference thực tế.
+
 ## Ngôn ngữ được hỗ trợ
 
 Việc extract symbol bằng Tree-sitter (hàm, lớp, phương thức và call edge)

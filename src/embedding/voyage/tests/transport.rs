@@ -39,8 +39,16 @@ async fn ollama_omits_authorization_without_key_and_decodes_native_embeddings() 
                 *seen.authorization.lock().unwrap() = headers
                     .get(axum::http::header::AUTHORIZATION)
                     .map(|value| value.to_str().unwrap_or_default().to_owned());
-                *seen.model.lock().unwrap() = body.get("model").and_then(|model| model.as_str()).map(str::to_owned);
-                assert_eq!(body.get("input").and_then(|input| input.as_array()).map(Vec::len), Some(1));
+                *seen.model.lock().unwrap() = body
+                    .get("model")
+                    .and_then(|model| model.as_str())
+                    .map(str::to_owned);
+                assert_eq!(
+                    body.get("input")
+                        .and_then(|input| input.as_array())
+                        .map(Vec::len),
+                    Some(1)
+                );
                 assert!(body.get("input_type").is_none());
                 assert!(body.get("dimensions").is_none());
                 Json(serde_json::json!({"model": "test-model", "embeddings": [[0.5, -0.25]]}))
@@ -59,7 +67,13 @@ async fn ollama_omits_authorization_without_key_and_decodes_native_embeddings() 
         None,
     )
     .unwrap();
-    let vectors = client.embed(&["hello".to_string()], crate::embedding::InputType::Document).await.unwrap();
+    let vectors = client
+        .embed(
+            &["hello".to_string()],
+            crate::embedding::InputType::Document,
+        )
+        .await
+        .unwrap();
     assert_eq!(vectors, vec![vec![0.5, -0.25]]);
     let query = client.embed_query("hello").await.unwrap();
     assert_eq!(query, vec![0.5, -0.25]);
@@ -97,9 +111,18 @@ async fn ollama_sends_configured_key_as_bearer_auth() {
         None,
     )
     .unwrap();
-    let vectors = client.embed(&["hello".to_string()], crate::embedding::InputType::Document).await.unwrap();
+    let vectors = client
+        .embed(
+            &["hello".to_string()],
+            crate::embedding::InputType::Document,
+        )
+        .await
+        .unwrap();
     assert_eq!(vectors, vec![vec![1.0]]);
     let query = client.embed_query("hello").await.unwrap();
     assert_eq!(query, vec![1.0]);
-    assert_eq!(authorization.lock().unwrap().as_deref(), Some("Bearer secret"));
+    assert_eq!(
+        authorization.lock().unwrap().as_deref(),
+        Some("Bearer secret")
+    );
 }

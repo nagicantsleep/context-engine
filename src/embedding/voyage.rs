@@ -26,6 +26,7 @@ pub enum Provider {
     Voyage,
     OpenAI,
     Ollama,
+    Onnx,
 }
 
 impl Provider {
@@ -34,6 +35,7 @@ impl Provider {
             "openai" => Ok(Self::OpenAI),
             "ollama" => Ok(Self::Ollama),
             "voyage" => Ok(Self::Voyage),
+            "onnx" => Ok(Self::Onnx),
             other => anyhow::bail!("unsupported embedding provider: {other}"),
         }
     }
@@ -43,6 +45,7 @@ impl Provider {
             Self::Voyage => "voyage",
             Self::OpenAI => "openai",
             Self::Ollama => "ollama",
+            Self::Onnx => "onnx",
         }
     }
 
@@ -51,16 +54,63 @@ impl Provider {
             Self::Voyage => VOYAGE_ENDPOINT,
             Self::OpenAI => OPENAI_ENDPOINT,
             Self::Ollama => OLLAMA_ENDPOINT,
+            Self::Onnx => "",
         }
+    }
+}
+
+pub fn new_embedding_client(
+    config: &crate::config::EmbeddingConfig,
+) -> Result<Arc<dyn crate::embedding::EmbeddingClient>> {
+    config.validate_for_provider()?;
+    let provider = Provider::parse(&config.provider)?;
+    match provider {
+        Provider::Onnx => {
+            let model = config
+                .onnx_model_path
+                .as_ref()
+                .context("onnx_model_path is required for ONNX")?;
+            let tokenizer = config
+                .onnx_tokenizer_path
+                .as_ref()
+                .context("onnx_tokenizer_path is required for ONNX")?;
+            Ok(Arc::new(crate::embedding::onnx::OnnxEmbeddingClient::new(
+                model, tokenizer,
+            )?))
+        }
+        Provider::Voyage | Provider::OpenAI => Ok(Arc::new(VoyageClient::new_for_provider(
+            provider,
+            config.model.clone(),
+            config.api_keys.clone(),
+            config.voyage_base_url.as_deref(),
+            config.dimensions,
+        )?)),
+        Provider::Ollama => Ok(Arc::new(VoyageClient::new_for_provider(
+            provider,
+            config.model.clone(),
+            config.api_keys.clone(),
+            config.ollama_base_url.as_deref(),
+            config.dimensions,
+        )?)),
     }
 }
 pub fn embedding_url(provider: Provider, base: Option<&str>) -> String {
     let raw = base.unwrap_or_default().trim();
-    if raw.is_empty() { return provider.default_endpoint().to_owned(); }
+    if raw.is_empty() {
+        return provider.default_endpoint().to_owned();
+    }
     let trimmed = raw.trim_end_matches('/');
     if provider == Provider::Ollama {
-        if trimmed.ends_with("/api/embed") { trimmed.to_owned() } else { format!("{trimmed}/api/embed") }
-    } else if trimmed.ends_with("/embeddings") { trimmed.to_owned() } else { format!("{trimmed}/embeddings") }
+        if trimmed.ends_with("/api/embed") {
+            trimmed.to_owned()
+        } else {
+            format!("{trimmed}/api/embed")
+        }
+    } else if trimmed.ends_with("/embeddings") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}/embeddings")
+    }
 }
 
 /// Backward-compatible URL resolver using the Voyage default endpoint.
@@ -128,6 +178,39 @@ impl VoyageClient {
 
     pub fn dimensions(&self) -> Option<u32> {
         self.inner.dimensions
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::embedding::EmbeddingClient for VoyageClient {
+    async fn embed(
+        &self,
+        texts: &[String],
+        input_type: crate::embedding::InputType,
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
+        VoyageClient::embed(self, texts, input_type).await
+    }
+
+    async fn embed_batch(
+        &self,
+        texts: &[String],
+        input_type: crate::embedding::InputType,
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
+        VoyageClient::embed_batch(self, texts, input_type).await
+    }
+
+    async fn embed_query(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        VoyageClient::embed_query(self, text).await
+    }
+
+    fn provider(&self) -> Provider {
+        self.provider()
+    }
+    fn model(&self) -> &str {
+        self.model()
+    }
+    fn dimensions(&self) -> Option<u32> {
+        self.dimensions()
     }
 }
 

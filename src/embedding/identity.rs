@@ -26,7 +26,7 @@
 //! There is deliberately no config-derived constructor: a second normalization
 //! path would risk diverging from the client actually used.
 
-use crate::embedding::voyage::{Provider, VoyageClient};
+use crate::embedding::{EmbeddingClient, voyage::Provider};
 use sha2::{Digest, Sha256};
 
 /// `index_meta` key under which a repo's committed embedding identity is stored.
@@ -39,10 +39,8 @@ const IDENTITY_STAMP_MIX_PRIME: u64 = 0x0000_0100_0000_01B3;
 
 /// Describes the embedding vector space: `(provider, model, dimensions)`.
 ///
-/// Two stores are query-compatible iff their identities are equal. This is a
-/// read-only projection of the three fields a [`VoyageClient`] stores verbatim
-/// (`new_for_provider` applies no normalization), so `from_client` faithfully
-/// captures the space of whatever client is passed.
+/// read-only projection of the provider, model, and dimensions exposed by an
+/// [`EmbeddingClient`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EmbeddingIdentity {
     provider: Provider,
@@ -52,7 +50,7 @@ pub struct EmbeddingIdentity {
 
 impl EmbeddingIdentity {
     /// The ONLY constructor: snapshot the identity of a real embedding client.
-    pub fn from_client(client: &VoyageClient) -> Self {
+    pub fn from_client(client: &dyn EmbeddingClient) -> Self {
         Self {
             provider: client.provider(),
             model: client.model().to_owned(),

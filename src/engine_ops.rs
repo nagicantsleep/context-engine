@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 
 use crate::config::{Settings, config_path, write_settings_atomic};
-use crate::embedding::voyage::VoyageClient;
+use crate::embedding::voyage::new_embedding_client;
 use crate::indexing::IndexEngine;
 use crate::llm::LlmClient;
 use crate::query::QueryResult;
@@ -177,17 +177,9 @@ pub async fn run_query_op(
     // None in standalone/CLI — every endpoint is local there.
     cross: Option<&crate::query::cross_repo::CrossRepoResolver>,
 ) -> Result<QueryResult> {
-    // Build the embedding client through the provider-aware factory so the
-    // configured `embedding.provider` (Voyage or OpenAI) is honored.
-    let voyage_client = VoyageClient::new_for_provider(
-        crate::embedding::voyage::Provider::parse(&settings.embedding.provider)
-            .context("invalid embedding provider")?,
-        settings.embedding.model.clone(),
-        settings.embedding.api_keys.clone(),
-        settings.embedding.voyage_base_url.as_deref(),
-        settings.embedding.dimensions,
-    )
-    .context("failed to create embedding client")?;
+    // Build through the provider-aware factory so Voyage, OpenAI, Ollama, and ONNX share one path.
+    let embedding_client =
+        new_embedding_client(&settings.embedding).context("failed to create embedding client")?;
 
     // Build LLM client for reranking (None if no keys configured or rerank disabled).
     let llm_client = if rerank {
@@ -205,7 +197,7 @@ pub async fn run_query_op(
         query_text,
         top_k,
         Some(&repo_filter),
-        &voyage_client,
+        embedding_client.as_ref(),
         index_engine,
         repo_dbs,
         settings.llm.rerank_min_prune_lines,

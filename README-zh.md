@@ -51,6 +51,25 @@ context-engine --port 6699
 | SSE 进度流 | 将实时索引进度事件流式传输到界面 |
 | 大型仓库扩展 | 内存有界且无 O(n²) 路径 —— 为 Linux/Chromium 规模的代码库而构建 |
 
+### 嵌入提供商
+
+默认使用 Voyage。Ollama 使用原生 HTTP endpoint，不要求 API key：
+
+```json
+{"embedding":{"provider":"ollama","model":"nomic-embed-text","api_keys":[],"ollama_base_url":"http://127.0.0.1:11434/api/embed"}}
+```
+
+ONNX 在本地运行，model 和 tokenizer 文件必须由用户提供并保存在仓库外：
+
+```json
+{"embedding":{"provider":"onnx","model":"local-sentence-transformer","api_keys":[],"onnx_model_path":"/models/model.onnx","onnx_tokenizer_path":"/models/tokenizer.json"}}
+```
+
+ONNX 要求命名输入 `input_ids`、`attention_mask`，以及可选的
+`token_type_ids`，随后执行 attention-mask mean pooling 和 L2 normalization。
+端到端运行需要兼容的 model/tokenizer；仓库没有捆绑 model fixture，因此实际
+inference 仍未完成验证。
+
 ## 支持的语言
 
 Tree-sitter 符号提取（函数、类、方法和调用边）按语言分别实现。文件扩展名在
