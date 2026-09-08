@@ -125,9 +125,10 @@ encoder and tokenizer outside the repository:
 
 The ONNX contract uses named `input_ids`, `attention_mask`, and optional
 `token_type_ids`, then attention-mask mean pooling and L2 normalization. Runtime
-validation requires a compatible user-supplied model/tokenizer pair; the
-repository has unit coverage for pooling, validation, and identity fingerprints,
-but no bundled model fixture for end-to-end inference verification.
+validation requires a compatible user-supplied model/tokenizer pair. A test-only
+embedded fixture verifies reordered inputs, optional `token_type_ids`, pooling,
+normalization, and the supported `Cast`/`Add`/`Unsqueeze`/`Concat` operator path;
+it is not a promise of compatibility with every ONNX model.
 ## Supported Languages
 
 Tree-sitter symbol extraction (functions, classes, methods, and call edges) is
