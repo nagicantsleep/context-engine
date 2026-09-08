@@ -24,12 +24,14 @@ fn voyage_defaults_and_normalization() {
 }
 
 #[test]
-fn provider_parsing_preserves_voyage_fallback() {
-    assert_eq!(Provider::parse("openai"), Provider::OpenAI);
-    assert_eq!(Provider::parse(" OpenAI "), Provider::OpenAI);
-    assert_eq!(Provider::parse("voyage"), Provider::Voyage);
-    assert_eq!(Provider::parse("unknown"), Provider::Voyage);
-    assert_eq!(Provider::parse(""), Provider::Voyage);
+fn provider_parsing_rejects_unknown_values() {
+    assert_eq!(Provider::parse("openai").unwrap(), Provider::OpenAI);
+    assert_eq!(Provider::parse(" OpenAI ").unwrap(), Provider::OpenAI);
+    assert_eq!(Provider::parse("voyage").unwrap(), Provider::Voyage);
+    assert_eq!(Provider::parse("ollama").unwrap(), Provider::Ollama);
+    assert!(Provider::parse("unknown").is_err());
+    assert!(Provider::parse("").is_err());
+    assert!(Provider::parse("onnx").is_err());
 }
 
 #[test]

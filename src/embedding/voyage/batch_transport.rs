@@ -25,6 +25,13 @@ impl VoyageClient {
         texts: &[String],
         input_type: InputType,
     ) -> Result<Vec<Vec<f32>>> {
+        if self.inner.provider == super::Provider::Ollama {
+            let key = self.inner.api_keys.first().map(String::as_str).unwrap_or("");
+            return self.try_embed_with_key(key, texts, input_type).await.map_err(|e| match e {
+                super::retry::EmbedError::RateLimited => anyhow::anyhow!("embedding rate limited"),
+                super::retry::EmbedError::Transient(err) | super::retry::EmbedError::Other(err) => err,
+            });
+        }
         let key_count = self.inner.api_keys.len();
         let mut transient_attempts = 0;
         loop {

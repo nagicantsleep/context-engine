@@ -11,6 +11,17 @@ use super::VoyageClient;
 impl VoyageClient {
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         let texts = vec![text.to_string()];
+        if self.inner.provider == super::Provider::Ollama {
+            let key = self.inner.api_keys.first().map(String::as_str).unwrap_or("");
+            let mut embeddings = self
+                .try_embed_query_with_key(key, &texts, InputType::Query)
+                .await
+                .map_err(|e| match e {
+                    EmbedError::RateLimited => anyhow::anyhow!("embedding rate limited"),
+                    EmbedError::Transient(error) | EmbedError::Other(error) => error,
+                })?;
+            return pop_query_embedding(&mut embeddings);
+        }
         let key_count = self.inner.api_keys.len();
         let start = self.inner.key_cursor.fetch_add(1, Ordering::Relaxed) % key_count;
 
