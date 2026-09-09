@@ -136,6 +136,7 @@ pub enum Lang {
     Lua,
     Luau,
     Svelte,
+    Vue,
     Pascal,
     Liquid,
     Other,
@@ -163,11 +164,13 @@ pub fn detect_language(path: &Path) -> Lang {
         Some("lua") => Lang::Lua,
         Some("luau") => Lang::Luau,
         Some("svelte") => Lang::Svelte,
+        Some("vue") => Lang::Vue,
         Some("pas" | "pp" | "dpr" | "lpr" | "dpk") => Lang::Pascal,
         Some("liquid") => Lang::Liquid,
         _ => Lang::Other,
     }
 }
+
 
 // ─── Entry point ──────────────────────────────────────────────────────────
 
@@ -337,9 +340,12 @@ pub fn parse_file(file_path: &str, source: &str) -> ParseResult {
             (s, e, HashMap::new(), c)
         }
         Lang::Svelte => {
-            // Svelte uses a hand-rolled extractor without a retained tree;
-            // chunk via the source-only fallback (non-overlapping line windows).
             let (s, e) = extract_svelte(file_path, source);
+            let c = chunk_file(file_path, source, &s);
+            (s, e, HashMap::new(), c)
+        }
+        Lang::Vue => {
+            let (s, e) = extract_sfc_scripts(file_path, source);
             let c = chunk_file(file_path, source, &s);
             (s, e, HashMap::new(), c)
         }
@@ -5008,7 +5014,45 @@ fn extract_pascal_node(
             }
         }
     }
+// ─── SFC script extractor (bounded Vue/Svelte fallback) ───────────────────
+
 }
+
+fn extract_sfc_scripts(file: &str, source: &str) -> (Vec<Symbol>, Vec<RawEdge>) {
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let mut cursor = 0;
+    while let Some(rel) = source[cursor..].find("<script") {
+        let start = cursor + rel;
+        let Some(tag_end_rel) = source[start..].find('>') else { break };
+        let tag_end = start + tag_end_rel;
+        let tag = &source[start..=tag_end];
+        // Require a real script tag, not <scripture>; avoid treating comments as blocks.
+        if tag.as_bytes().get(7).is_some_and(|b| b.is_ascii_alphanumeric()) {
+            cursor = tag_end + 1;
+            continue;
+        }
+        let content_start = tag_end + 1;
+        let Some(close_rel) = source[content_start..].find("</script>") else { break };
+        let content_end = content_start + close_rel;
+        let script = &source[content_start..content_end];
+        let is_ts = tag.split_whitespace().any(|a| a == "lang=\"ts\"" || a == "lang='ts'" || a == "lang=\"tsx\"" || a == "lang='tsx'");
+        let grammar: tree_sitter::Language = if is_ts { tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into() } else { tree_sitter_javascript::LANGUAGE.into() };
+        let mut parser = Parser::new();
+        if parser.set_language(&grammar).is_ok() {
+            if let Some(tree) = parser.parse(script, None) {
+                let (mut syms, mut edgs) = extract_javascript(file, script, &tree);
+                let offset = source[..content_start].bytes().filter(|b| *b == b'\n').count() as u32;
+                for sym in &mut syms { sym.line_start += offset; sym.line_end += offset; }
+                for edge in &mut edgs { edge.line += offset; }
+                symbols.extend(syms); edges.extend(edgs);
+            }
+        }
+        cursor = content_end + "</script>".len();
+    }
+    (symbols, edges)
+}
+
 
 // ─── Svelte extractor (hybrid: template parse → script extract → offset) ─
 
@@ -6635,6 +6679,7 @@ function greet(name) {
             result
                 .symbols
                 .iter()
+
                 .map(|s| &s.qualified.name)
                 .collect::<Vec<_>>()
         );
@@ -6671,6 +6716,23 @@ function typedFunc(): string {
                 .map(|s| &s.qualified.name)
                 .collect::<Vec<_>>()
         );
+    }
+}
+#[cfg(test)]
+mod vue_tests {
+    use super::*;
+    #[test]
+    fn extracts_vue_script_with_offset() {
+        let src = "<template><div /></template>\n<script setup lang=\"ts\">\nfunction greet() {}\ngreet();\n</script>\n";
+        let result = parse_file("Comp.vue", src);
+        let f = result.symbols.iter().find(|s| s.qualified.name == "greet").unwrap();
+        assert_eq!(f.line_start, 3);
+        assert!(result.edges.iter().any(|e| e.line == 4));
+    }
+    #[test]
+    fn template_only_and_malformed_vue_are_safe() {
+        assert!(parse_file("Comp.vue", "<template><div /></template>").symbols.is_empty());
+        assert!(parse_file("Comp.vue", "<script>function broken(").symbols.is_empty());
     }
 }
 
