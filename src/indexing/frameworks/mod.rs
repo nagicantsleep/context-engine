@@ -6,6 +6,7 @@
 //! and an `extract_edges` method that produces additional `RawEdge`s from source
 //! files belonging to that framework.
 
+pub mod angular;
 pub mod django;
 pub mod expo;
 pub mod express;
@@ -15,11 +16,12 @@ pub mod go_gin;
 pub mod java_kotlin;
 pub mod laravel;
 pub mod nestjs;
+pub mod nextjs;
 pub mod rails;
 pub mod react;
 pub mod spring;
+pub mod sveltekit;
 pub mod swift_objc;
-
 use std::collections::HashSet;
 
 use crate::parsing::relations::RawEdge;
@@ -65,17 +67,20 @@ impl FrameworkRegistry {
     pub fn new() -> Self {
         let resolvers: Vec<Box<dyn FrameworkResolver>> = vec![
             Box::new(react::ReactResolver),
-            Box::new(express::ExpressResolver),
+            Box::new(angular::AngularResolver),
             Box::new(django::DjangoResolver),
-            Box::new(spring::SpringResolver),
-            Box::new(go_gin::GoGinResolver),
+            Box::new(expo::ExpoResolver),
+            Box::new(express::ExpressResolver),
             Box::new(fastapi::FastApiResolver),
+            Box::new(flutter::FlutterResolver),
+            Box::new(go_gin::GoGinResolver),
+            Box::new(java_kotlin::JavaKotlinResolver),
             Box::new(laravel::LaravelResolver),
             Box::new(nestjs::NestJsResolver),
+            Box::new(nextjs::NextjsResolver),
             Box::new(rails::RailsResolver),
-            Box::new(expo::ExpoResolver),
-            Box::new(flutter::FlutterResolver),
-            Box::new(java_kotlin::JavaKotlinResolver),
+            Box::new(spring::SpringResolver),
+            Box::new(sveltekit::SvelteKitResolver),
             Box::new(swift_objc::SwiftObjcResolver),
         ];
         Self {
