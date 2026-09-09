@@ -167,6 +167,7 @@ pub fn detect_language(path: &Path) -> Lang {
         Some("svelte") => Lang::Svelte,
         Some("vue") => Lang::Vue,
         Some("proto") => Lang::Proto,
+        Some("pas" | "pp" | "dpr" | "lpr" | "dpk") => Lang::Pascal,
         Some("liquid") => Lang::Liquid,
         _ => Lang::Other,
     }
