@@ -6723,11 +6723,11 @@ mod vue_tests {
     use super::*;
     #[test]
     fn extracts_vue_script_with_offset() {
-        let src = "<template><div /></template>\n<script setup lang=\"ts\">\nfunction greet() {}\ngreet();\n</script>\n";
+        let src = "<template><div /></template>\n<script setup lang=\"ts\">\nfunction greet() { helper(); }\nfunction helper() {}\n</script>\n";
         let result = parse_file("Comp.vue", src);
         let f = result.symbols.iter().find(|s| s.qualified.name == "greet").unwrap();
         assert_eq!(f.line_start, 3);
-        assert!(result.edges.iter().any(|e| e.line == 4));
+        assert!(result.edges.iter().any(|e| e.line == 3));
     }
     #[test]
     fn template_only_and_malformed_vue_are_safe() {
