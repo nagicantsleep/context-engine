@@ -34,7 +34,7 @@ context-engine --port 6699
 | 功能 | 描述 |
 |------|------|
 | 语义代码搜索 | 通过嵌入向量按语义查找代码，而非字面文本匹配 |
-| 多语言解析 | 使用 Tree-sitter 为 22 种语言提取符号（见下表） |
+| 多语言解析 | 使用 Tree-sitter 为 23 种语言提取符号（见下表） |
 | 调用图扩展 | 解析调用方/被调方边，并在查询时对匹配符号进行 BFS 扩展 |
 | Import 路径解析 | 为 TS/JS、Python、Go、Rust 追踪 import 到实际文件 —— 解析 name matching 遗漏的跨模块调用 |
 | Framework 感知解析 | 检测 React、Express、Django、Spring、Go Gin 并自动生成 routing/DI/rendering 边 |
@@ -96,6 +96,8 @@ Tree-sitter 符号提取（函数、类、方法和调用边）按语言分别�
 | Lua | `.lua` | `tree-sitter-lua` |
 | Luau | `.luau` | `tree-sitter-luau` |
 | Svelte | `.svelte` | `tree-sitter-javascript`（script block） |
+| Vue | `.vue` | `tree-sitter-javascript` / `tree-sitter-typescript`（script block） |
+| Protocol Buffers | `.proto` | `tree-sitter-protobuf`（vendored） |
 | Pascal | `.pas`、`.pp`、`.dpr`、`.lpr`、`.dpk` | `tree-sitter-pascal` |
 | Liquid | `.liquid` | `tree-sitter-liquid` |
 

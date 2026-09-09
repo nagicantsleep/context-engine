@@ -69,6 +69,7 @@ tree-sitter-luau = "1"
 tree-sitter-svelte-ng = "1"
 tree-sitter-pascal = "0.10"
 tree-sitter-liquid = { path = "vendor/tree-sitter-liquid" }
+tree-sitter-protobuf = { path = "vendor/tree-sitter-protobuf" }
 base64 = "0.22"
 md5 = "0.7"
 sha2 = "0.10"

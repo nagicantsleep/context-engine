@@ -74,7 +74,7 @@ Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
 | Feature | Description |
 |---------|-------------|
 | Semantic code search | Finds code by meaning via embeddings, not literal text matching |
-| Multi-language parsing | Tree-sitter symbol extraction for 22 languages (see table below) |
+| Multi-language parsing | Tree-sitter symbol extraction for 23 languages (see table below) |
 | Call-graph expansion | Resolves caller/callee edges and BFS-expands matched symbols at query time |
 | Import-path resolution | Traces imports to actual files for TS/JS, Python, Go, and Rust — resolves cross-module calls that name matching misses |
 | Framework-aware resolution | Detects React, Express, Django, Spring, Go Gin and produces routing/DI/rendering edges automatically |
@@ -156,6 +156,8 @@ implemented per language. File extensions are mapped in `detect_language`
 | Lua | `.lua` | `tree-sitter-lua` |
 | Luau | `.luau` | `tree-sitter-luau` |
 | Svelte | `.svelte` | `tree-sitter-javascript` (script block) |
+| Vue | `.vue` | `tree-sitter-javascript` / `tree-sitter-typescript` (script block) |
+| Protocol Buffers | `.proto` | vendored `tree-sitter-protobuf` |
 | Pascal | `.pas`, `.pp`, `.dpr`, `.lpr`, `.dpk` | `tree-sitter-pascal` |
 | Liquid | `.liquid` | `tree-sitter-liquid` |
 
