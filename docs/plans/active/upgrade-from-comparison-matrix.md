@@ -82,7 +82,9 @@ Smallest coherent sequence; update when evidence changes it.
 - [x] 2.2 Local/ONNX embedding provider + Ollama provider and docs
   - Ollama: native `/api/embed`, keyed/no-key auth, strict provider parsing, provider-aware indexing/query construction, cache namespace, and en/vi/zh docs.
 - [ ] 2.3 proto, vue grammars; Angular/Next.js/SvelteKit resolvers
-  - Vue partial 2026-09-09: `.vue` detection and bounded `<script>`/`<script setup>` extraction reuse JavaScript/TypeScript grammars with source-line offsets; template AST is intentionally unsupported. Focused Vue parser tests pass. Proto remains blocked: available `devgen-tree-sitter-protobuf 0.21.0` conflicts with the repository's `tree-sitter 0.25`; no compatible crate is available. Angular/Next.js/SvelteKit resolvers remain pending.
+  - Vue partial: bounded `.vue` `<script>`/`<script setup>` extraction reuses JS/TS grammars with line offsets; template AST unsupported. Focused parser test passes.
+  - Resolvers partial: Angular detects `@angular/core`/`@angular/common` and emits decorator-to-class edges; Next.js detects `next` and app/pages route files; SvelteKit detects `@sveltejs/kit` and route `load`/`actions`/page edges. Focused suites: Angular 3, Next.js 3, SvelteKit 2 passed. `cargo check --all-targets` and `git diff --check` pass.
+  - Proto blocked: only available `devgen-tree-sitter-protobuf 0.21.0` conflicts with repository `tree-sitter 0.25`; attempted dependency was reverted. Requires a compatible vendored/regenerated grammar before proto implementation.
 
 ## Decisions
 
