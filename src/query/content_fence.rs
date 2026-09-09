@@ -263,17 +263,35 @@ mod tests {
     #[test]
     fn vendor_tokens_redacted_with_kind_marker() {
         let cases = vec![
-            (concat!("ghp_", "0123456789abcdefghij0123456789abcd"), "github-token"),
+            (
+                concat!("ghp_", "0123456789abcdefghij0123456789abcd"),
+                "github-token",
+            ),
             (
                 concat!("github_pat_", "11AAAAAAA0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
                 "github-token",
             ),
-            (concat!("sk-ant-api03-", "0123456789abcdefghij"), "anthropic-key"),
+            (
+                concat!("sk-ant-api03-", "0123456789abcdefghij"),
+                "anthropic-key",
+            ),
             (concat!("sk-proj-", "0123456789abcdefghij"), "openai-key"),
-            (concat!("sk-", "0123456789abcdefghijklmnopqrst"), "openai-key"),
-            (concat!("AIzaSy", "A1234567890abcdefghijklmnopqrstuv"), "google-api-key"),
-            (concat!("xoxb-123456789012-", "abcdefghijklmn"), "slack-token"),
-            (concat!("npm_", "0123456789abcdefghijklmnopqrstuvwxyz"), "npm-token"),
+            (
+                concat!("sk-", "0123456789abcdefghijklmnopqrst"),
+                "openai-key",
+            ),
+            (
+                concat!("AIzaSy", "A1234567890abcdefghijklmnopqrstuv"),
+                "google-api-key",
+            ),
+            (
+                concat!("xoxb-123456789012-", "abcdefghijklmn"),
+                "slack-token",
+            ),
+            (
+                concat!("npm_", "0123456789abcdefghijklmnopqrstuvwxyz"),
+                "npm-token",
+            ),
             (concat!("sk_live_", "0123456789abcd"), "stripe-key"),
             (concat!("AKIA", "IOSFODNN7EXAMPLE"), "aws-access-key"),
         ];

@@ -37,7 +37,7 @@ Nền tảng được hỗ trợ: Linux x64/arm64, macOS arm64, Windows x64.
 | Tính năng | Mô tả |
 |-----------|-------|
 | Semantic code search | Tìm mã theo ý nghĩa thông qua embedding, không khớp văn bản thuần |
-| Multi-language parsing | Extract symbol bằng Tree-sitter cho 22 ngôn ngữ (xem bảng bên dưới) |
+| Multi-language parsing | Extract symbol bằng Tree-sitter cho 23 ngôn ngữ (xem bảng bên dưới) |
 | Call-graph expansion | Resolve caller/callee edge và BFS expand các symbol khớp khi query |
 | Import-path resolution | Trace import tới file thật cho TS/JS, Python, Go, Rust — resolve cross-module call mà name matching bỏ lỡ |
 | Framework-aware resolution | Phát hiện React, Express, Django, Spring, Go Gin và tạo routing/DI/rendering edge tự động |
@@ -101,6 +101,8 @@ Việc extract symbol bằng Tree-sitter (hàm, lớp, phương thức và call 
 | Lua | `.lua` | `tree-sitter-lua` |
 | Luau | `.luau` | `tree-sitter-luau` |
 | Svelte | `.svelte` | `tree-sitter-javascript` (script block) |
+| Vue | `.vue` | `tree-sitter-javascript` / `tree-sitter-typescript` (script block) |
+| Protocol Buffers | `.proto` | `tree-sitter-protobuf` (vendored) |
 | Pascal | `.pas`, `.pp`, `.dpr`, `.lpr`, `.dpk` | `tree-sitter-pascal` |
 | Liquid | `.liquid` | `tree-sitter-liquid` |
 
