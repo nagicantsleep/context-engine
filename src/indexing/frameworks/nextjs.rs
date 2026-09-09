@@ -71,16 +71,12 @@ fn route_for_file(file_path: &str) -> Option<String> {
     }
     let mut route = stem.to_string();
     if root == "app" {
-        if route.ends_with("/layout") || route == "layout" {
-            return None;
-        }
         route = if matches!(route.as_str(), "page" | "route") {
             String::new()
         } else {
             route
                 .strip_suffix("/page")
-                .or_else(|| route.strip_suffix("/route"))
-                .unwrap_or("")
+                .or_else(|| route.strip_suffix("/route"))?
                 .to_string()
         };
     } else if route == "index" {
@@ -145,5 +141,14 @@ mod tests {
                 .extract_edges("app/blog/layout.tsx", "", &[])
                 .is_empty()
         );
+        for file in [
+            "app/loading.tsx",
+            "app/error.tsx",
+            "app/template.tsx",
+            "app/not-found.tsx",
+            "app/default.tsx",
+        ] {
+            assert!(route_for_file(file).is_none(), "{file} is not a route");
+        }
     }
 }
