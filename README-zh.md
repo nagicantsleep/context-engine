@@ -47,9 +47,54 @@ context-engine --port 6699
 | LLM 重排序 | 使用 LLM（OpenAI / Google）对候选片段重新排序；可选，可禁用 |
 | 内嵌 SurrealDB | 存储片段、符号和边；每个仓库一个数据存储 |
 | HTTP API + Web 界面 | 配置管理、索引浏览器和查询测试控制台 |
-| MCP 服务器 | 通过可流式 HTTP 暴露 `codebase-retrieval` 和 `file-retrieval` 工具 |
+| MCP 服务器 | `codebase-retrieval`、`file-retrieval`、只读图谱工具 `trace-path` / `symbol-context` / `impact`，以及始终可用的发现工具 `list_repos` |
+| 密钥脱敏 | 在内容进入重排 LLM 或任何工具输出之前，先从 chunk 内容中脱敏 API 密钥和凭据 |
+| 可移植图谱导出 | `export-graph` 将节点、边及每条边的置信度写入带版本的 JSON 产物 |
 | SSE 进度流 | 将实时索引进度事件流式传输到界面 |
 | 大型仓库扩展 | 内存有界且无 O(n²) 路径 —— 为 Linux/Chromium 规模的代码库而构建 |
+
+## MCP 工具
+
+全局 `/mcp`（每次调用都传入绝对路径 `workspace_full_path`）与每个仓库的
+`/mcp-repo/<name>`（workspace 已预绑定）两个端点暴露相同的工具集。全新配置默认
+只启用 `codebase-retrieval`；`file-retrieval`、`trace-path`、`symbol-context`
+和 `impact` 需要在设置（或 Web 界面）中通过 `enabled_mcp_tools` 显式开启。
+`list_repos` 始终暴露，因为发现能力不应依赖 opt-in。在全局端点上，与仓库相关
+的工具会被转发到该仓库的 worker，输出与 per-repo 端点完全一致：
+
+| 工具 | 关键参数 | 用途 |
+|------|---------------|---------|
+| `codebase-retrieval` | `workspace_full_path`、`information_request`、可选 `max_tokens` | 语义搜索，带调用图扩展与 LLM 重排 |
+| `file-retrieval` | `workspace_full_path`、`file_path`、`information_request`、可选 `top_k`、`max_tokens` | 限定在单个文件内的检索 |
+| `list_repos` | — | 只读发现：已配置的仓库、各自的 per-repo 端点名及索引状态 |
+| `trace-path` | `workspace_full_path`、`from_symbol`、`to_symbol`、可选 `direction`（`callees`/`callers`）、`max_depth`（默认 5，上限 10） | 两个符号之间的调用路径；提取边优先于推断边 |
+| `symbol-context` | `workspace_full_path`、`symbol` | 单个符号的带行号定义源码及调用者/被调用者摘要 |
+| `impact` | `workspace_full_path`、`symbol`、可选 `max_depth`（默认 3，上限 8） | 按调用者距离分层的反向调用图遍历，并给出受影响最多文件的摘要 |
+
+符号接受完整 FQN（`/abs/file.rs::mod::name`）、`file.rs::name`、`::name` 或裸
+名称；歧义引用会返回候选列表而不是猜测。触及深度或预算上限而截断时一定会明
+确说明，绝不静默。图谱工具只读取该仓库自己的调用图 —— 不跟随跨仓库调用者
+（见 [decision 0002](docs/decisions/0002-multi-repo-namespace.md)）。
+
+### 密钥脱敏
+
+chunk 内容在进入重排 LLM 或任何工具输出之前会先脱敏。厂商形态的令牌
+（Anthropic/OpenAI/GitHub、Google、Slack、npm、Stripe、AWS、JWT、PEM 私钥）
+会变为 `[REDACTED:<kind>]`；`Authorization: Bearer/Basic/Token` 头和带
+userinfo 的 DSN URL 保留可信前缀并丢弃凭据；形似密钥的赋值保留标识符并脱敏
+值。普通代码（`password: String`、`process.env.API_KEY`）原样通过，且脱敏
+是幂等的。
+
+### 一次性 CLI 命令
+
+```bash
+# 为已在引擎中配置的仓库写入 MCP 客户端配置 + agent 引导文件
+# （Web 界面 "Auto Setup" 按钮的 CLI 孪生；从不启动引擎）
+context-engine setup --repo /abs/path/to/repo [--tool claude,codex,opencode|all] [--port 6699] [--bind 127.0.0.1] [--url https://proxy]
+
+# 将调用图导出为可移植的 JSON 产物（context-engine-graph/v1）
+context-engine export-graph --repo /abs/path/to/repo [--out graph.json] [--max-nodes N] [--max-edges N]
+```
 
 ### 嵌入提供商
 

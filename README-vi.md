@@ -50,9 +50,60 @@ Nền tảng được hỗ trợ: Linux x64/arm64, macOS arm64, Windows x64.
 | LLM rerank | Sắp xếp lại các candidate chunk bằng LLM (OpenAI / Google); tùy chọn, có thể tắt |
 | Embedded SurrealDB | Lưu chunk, symbol và edge; một datastore cho mỗi repo |
 | HTTP API + Web UI | Quản lý cấu hình, index explorer và bảng điều khiển thử query |
-| MCP server | Cung cấp `codebase-retrieval` và `file-retrieval` tool qua streamable HTTP |
+| MCP server | `codebase-retrieval`, `file-retrieval`, các graph tool chỉ đọc `trace-path` / `symbol-context` / `impact`, và tool khám phá `list_repos` luôn khả dụng |
+| Secret redaction | API key và thông tin xác thực được che khỏi nội dung chunk trước khi tới rerank LLM hoặc bất kỳ output nào |
+| Portable graph export | `export-graph` ghi nodes, edges và confidence từng edge ra artifact JSON có phiên bản |
 | SSE progress stream | Truyền sự kiện indexing progress trực tiếp tới UI |
 | Large-repo scaling | Bounded memory và không có đường O(n²) — xây dựng cho codebase quy mô Linux/Chromium |
+
+## Công cụ MCP
+
+Cả hai MCP endpoint — `/mcp` toàn cục (truyền đường dẫn tuyệt đối
+`workspace_full_path` ở mỗi lần gọi) và từng `/mcp-repo/<name>` theo repo
+(workspace được gắn sẵn) — expose cùng một bộ tool. Cấu hình mới chỉ bật
+`codebase-retrieval`; `file-retrieval`, `trace-path`, `symbol-context` và
+`impact` là opt-in qua `enabled_mcp_tools` trong settings (hoặc Web UI).
+`list_repos` luôn được expose, vì việc khám phá không được phụ thuộc vào
+opt-in. Trên endpoint toàn cục, các tool gắn với repo được chuyển tiếp tới
+worker của repo đó, nên output giống hệt per-repo endpoint:
+
+| Tool | Tham số chính | Mục đích |
+|------|---------------|---------|
+| `codebase-retrieval` | `workspace_full_path`, `information_request`, tùy chọn `max_tokens` | Tìm kiếm ngữ nghĩa với call-graph expansion và LLM rerank |
+| `file-retrieval` | `workspace_full_path`, `file_path`, `information_request`, tùy chọn `top_k`, `max_tokens` | Truy hồi giới hạn trong một file |
+| `list_repos` | — | Khám phá chỉ đọc: các repo đã cấu hình, tên per-repo endpoint và trạng thái index |
+| `trace-path` | `workspace_full_path`, `from_symbol`, `to_symbol`, tùy chọn `direction` (`callees`/`callers`), `max_depth` (mặc định 5, giới hạn 10) | Đường gọi giữa hai symbol; edge extracted được ưu tiên hơn edge inferred |
+| `symbol-context` | `workspace_full_path`, `symbol` | Nguồn định nghĩa đánh số dòng cùng tóm tắt caller/callee của một symbol |
+| `impact` | `workspace_full_path`, `symbol`, tùy chọn `max_depth` (mặc định 3, giới hạn 8) | Duyệt call-graph ngược theo tầng caller, kèm tóm tắt các file bị ảnh hưởng nhiều nhất |
+
+Symbol chấp nhận FQN đầy đủ (`/abs/file.rs::mod::name`), `file.rs::name`,
+`::name`, hoặc tên trần; tham chiếu mơ hồ sẽ trả về danh sách candidate thay vì
+đoán. Việc cắt bớt do chạm giới hạn depth hay budget luôn được nói rõ, không
+bao giờ im lặng. Các graph tool chỉ đọc call graph của repo đó — caller
+cross-repo không được đi tiếp (theo [decision
+0002](docs/decisions/0002-multi-repo-namespace.md)).
+
+### Secret redaction
+
+Nội dung chunk được che mũ trước khi tới rerank LLM hoặc bất kỳ output nào.
+Token có dạng vendor (Anthropic/OpenAI/GitHub, Google, Slack, npm, Stripe, AWS,
+JWT, PEM private key) trở thành `[REDACTED:<kind>]`; header `Authorization:
+Bearer/Basic/Token` và URL DSN có userinfo giữ phần prefix đáng tin và bỏ phần
+credential; phép gán trông như secret giữ lại định danh và che giá trị. Code
+thường (`password: String`, `process.env.API_KEY`) đi qua nguyên vẹn, và việc
+redaction có tính idempotent.
+
+### Lệnh CLI one-shot
+
+```bash
+# Ghi MCP client config + file hướng dẫn agent cho repo đã được cấu hình
+# trong engine (bản CLI twin của nút "Auto Setup" trên Web UI; không bao giờ
+# khởi động engine)
+context-engine setup --repo /duong/dan/toi/repo [--tool claude,codex,opencode|all] [--port 6699] [--bind 127.0.0.1] [--url https://proxy]
+
+# Xuất call graph ra artifact JSON di động (context-engine-graph/v1)
+context-engine export-graph --repo /duong/dan/toi/repo [--out graph.json] [--max-nodes N] [--max-edges N]
+```
 
 ### Nhà cung cấp embedding
 

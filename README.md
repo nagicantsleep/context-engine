@@ -87,10 +87,61 @@ Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
 | LLM reranking | Reorders candidate chunks with an LLM (OpenAI / Google); optional, can be disabled |
 | Embedded SurrealDB | Stores chunks, symbols, and edges; one datastore per repo |
 | HTTP API + Web UI | Settings management, index explorer, and a query test console |
-| MCP server | Exposes `codebase-retrieval` and `file-retrieval` tools over streamable HTTP |
+| MCP server | `codebase-retrieval`, `file-retrieval`, read-only graph tools `trace-path` / `symbol-context` / `impact`, and the always-on `list_repos` discovery tool |
+| Secret redaction | API keys and credentials are redacted from chunk content before it reaches the rerank LLM or any tool output |
+| Portable graph export | `export-graph` writes nodes, edges, and per-edge confidence to a versioned JSON artifact |
 | SSE progress stream | Streams live indexing progress events to the UI |
 | Large-repo scaling | Bounded memory and no O(n²) paths — built for Linux/Chromium-scale codebases |
 
+
+## MCP tools
+
+Both MCP endpoints — the global `/mcp` (pass the absolute `workspace_full_path`
+on every call) and each per-repo `/mcp-repo/<name>` (workspace pre-bound) —
+expose the same tool set. Only `codebase-retrieval` is enabled on fresh
+settings; `file-retrieval`, `trace-path`, `symbol-context`, and `impact` are
+opt-in via `enabled_mcp_tools` in the settings (or the Web UI). `list_repos` is
+always exposed, because discovery must not depend on opt-ins. On the global
+endpoint the repo-backed tools are forwarded to the repo's worker, so output is
+identical to the per-repo endpoints:
+
+| Tool | Key arguments | Purpose |
+|------|---------------|---------|
+| `codebase-retrieval` | `workspace_full_path`, `information_request`, optional `max_tokens` | Semantic search with call-graph expansion and LLM rerank |
+| `file-retrieval` | `workspace_full_path`, `file_path`, `information_request`, optional `top_k`, `max_tokens` | Retrieval scoped to a single file |
+| `list_repos` | — | Read-only discovery: configured repos, their per-repo endpoint names, and index state |
+| `trace-path` | `workspace_full_path`, `from_symbol`, `to_symbol`, optional `direction` (`callees`/`callers`), `max_depth` (default 5, cap 10) | Call path between two symbols; extracted edges outrank inferred ones |
+| `symbol-context` | `workspace_full_path`, `symbol` | Numbered definition source plus a caller/callee summary for one symbol |
+| `impact` | `workspace_full_path`, `symbol`, optional `max_depth` (default 3, cap 8) | Reverse call-graph walk grouped by caller distance, with a most-affected-files summary |
+
+Symbols accept a full FQN (`/abs/file.rs::mod::name`), `file.rs::name`,
+`::name`, or a bare name; ambiguous references return the candidate list
+instead of guessing. Truncation from a depth or budget cap is stated
+explicitly, never silent. The graph tools read the repo's own call graph only —
+cross-repo callers are not followed ([decision
+0002](docs/decisions/0002-multi-repo-namespace.md)).
+
+### Secret redaction
+
+Chunk content is redacted before it reaches the rerank LLM or any tool output.
+Vendor-shaped tokens (Anthropic/OpenAI/GitHub, Google, Slack, npm, Stripe, AWS,
+JWT, PEM private keys) become `[REDACTED:<kind>]`; `Authorization:
+Bearer/Basic/Token` headers and userinfo DSN URLs keep the trusted prefix and
+drop the credential; generic secret-looking assignments keep the identifier and
+redact the value. Ordinary code (`password: String`, `process.env.API_KEY`)
+passes untouched, and redaction is idempotent.
+
+### One-shot CLI commands
+
+```bash
+# Write MCP client config + agent guidance files for a repo that is already
+# configured in the engine (CLI twin of the Web UI "Auto Setup" button;
+# never boots the engine)
+context-engine setup --repo /abs/path/to/repo [--tool claude,codex,opencode|all] [--port 6699] [--bind 127.0.0.1] [--url https://proxy]
+
+# Export the call graph as a portable JSON artifact (context-engine-graph/v1)
+context-engine export-graph --repo /abs/path/to/repo [--out graph.json] [--max-nodes N] [--max-edges N]
+```
 
 ### Embedding providers
 
