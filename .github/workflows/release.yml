@@ -104,6 +104,12 @@ jobs:
 
       - name: Build binary
         run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          # esaxx-rs builds its C++ with the static CRT (.static_crt(true)); a
+          # dynamic-CRT rustc default leaves the final link with mixed
+          # RuntimeLibrary objects (LNK2038 → LNK1169). Pin the whole Windows
+          # binary to the static CRT so every object agrees.
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
 
       - name: Prepare npm package
         shell: bash
