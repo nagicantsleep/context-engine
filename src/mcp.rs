@@ -1002,8 +1002,13 @@ pub async fn run_codebase_retrieval(
         index_engine.register_repo(repo).await;
     }
 
-    // 3. Confirm embedding keys are present.
-    if settings.embedding.api_keys.is_empty() {
+    // 3. Confirm embedding keys are present for key-based providers. Ollama and
+    // ONNX run locally without credentials (documented no-key setups).
+    let needs_key = !matches!(
+        settings.embedding.provider.trim().to_ascii_lowercase().as_str(),
+        "ollama" | "onnx"
+    );
+    if needs_key && settings.embedding.api_keys.is_empty() {
         return "Error: no embedding API keys configured. \
                 Add a Voyage AI key in the Context Engine UI first."
             .to_string();
