@@ -185,10 +185,17 @@ pub async fn build_router_app(opts: RouterBootOptions) -> Result<(Router, ProxyC
     mcp_config.session_store = Some(Arc::new(
         crate::mcp_session_store::BoundedSessionStore::new(),
     ));
+    // list_repos on the global /mcp is served router-side from these dirs, so
+    // the proxy handler needs them even though every repo-backed call is
+    // forwarded to a worker.
+    let mcp_home_dir = state.home_dir.clone();
+    let mcp_data_dir = state.data_dir.clone();
     let mcp_service = StreamableHttpService::new(
         move || {
             Ok(mcp_proxy::ProxyMcpHandler::new(
                 mcp_proxy_ctx.clone(),
+                mcp_home_dir.clone(),
+                mcp_data_dir.clone(),
                 &enabled_tools,
             ))
         },

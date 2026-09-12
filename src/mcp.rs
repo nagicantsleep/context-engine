@@ -891,16 +891,17 @@ fn select_empty_or_warming_message(
 }
 
 /// Shared read-only repo discovery behind the `list_repos` MCP tool (used by
-/// both the global and per-repo handlers). Reads ONLY the settings snapshot
-/// passed in plus durable sidecars — it never registers a repo, spawns a
-/// worker, or triggers indexing, so it is safe on the cold global `/mcp` route.
+/// the global, per-repo, and router-proxy handlers). Reads ONLY the settings
+/// snapshot passed in plus durable sidecars — it never registers a repo,
+/// spawns a worker, or triggers indexing, so it is safe on the cold global
+/// `/mcp` route.
 ///
 /// `this_repo` (per-repo endpoint) marks which entry is the pre-bound
 /// workspace. `list_repos` is intentionally NOT gated by `enabled_mcp_tools`
 /// (unlike the retrieval tools): it is the discovery surface that makes the
 /// gated tools usable under default settings, and it exposes nothing the
 /// router does not already serve through read-only routes.
-fn run_list_repos(settings: &Settings, data_dir: &Path, this_repo: Option<&str>) -> String {
+pub(crate) fn run_list_repos(settings: &Settings, data_dir: &Path, this_repo: Option<&str>) -> String {
     let repos = &settings.repos;
     if repos.is_empty() {
         return "No repos configured yet. A repo is added automatically the first \
@@ -1143,13 +1144,14 @@ fn format_enriched_callee_tag(count: Option<u32>, names: &[String], inferred: bo
     }
 }
 
-/// Shared `trace-path` runner (global + per-repo handlers): resolve both
+/// Shared `trace-path` runner (global, per-repo, and worker REST
+/// `/api/mcp-tool/trace-path` handlers): resolve both
 /// symbol references against the repo's symbol table, then depth-bounded DFS
 /// over the repo's own `calls` table. Read-only — the DB is opened through the
 /// same `get_or_open` path as `file-retrieval`; the tool never registers a
 /// repo, spawns a worker, or triggers indexing.
 #[allow(clippy::too_many_arguments)]
-async fn run_trace_path(
+pub(crate) async fn run_trace_path(
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     data_dir: &Path,
     settings: &Settings,
@@ -1239,13 +1241,14 @@ async fn run_trace_path(
     out
 }
 
-/// Shared `symbol-context` runner (global + per-repo handlers): one read-only
+/// Shared `symbol-context` runner (global, per-repo, and worker REST
+/// `/api/mcp-tool/symbol-context` handlers): one read-only
 /// call that resolves a symbol and returns its definition source (numbered,
 /// secret-fenced through `read_lines_from_fs`) together with its call-graph
 /// context (caller/callee counts + proximity-sorted names — the same enriched
 /// tags retrieval output uses). Opens the DB through the same `get_or_open`
 /// path as `file-retrieval`; never registers a repo or triggers indexing.
-async fn run_symbol_context(
+pub(crate) async fn run_symbol_context(
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     data_dir: &Path,
     settings: &Settings,
@@ -1348,11 +1351,12 @@ async fn run_symbol_context(
     out
 }
 
-/// Shared `impact` runner (global + per-repo handlers): reverse call-graph
+/// Shared `impact` runner (global, per-repo, and worker REST
+/// `/api/mcp-tool/impact` handlers): reverse call-graph
 /// analysis — every symbol that transitively CALLS the target, BFS-grouped by
 /// hop distance. Read-only, repo-local edges only (same scope as trace-path);
 /// output adds a most-affected-files summary for triage.
-async fn run_impact(
+pub(crate) async fn run_impact(
     repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
     data_dir: &Path,
     settings: &Settings,

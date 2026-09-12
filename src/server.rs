@@ -314,6 +314,9 @@ fn build_router_inner(
         .route("/api/mcp-tool", post(post_mcp_tool))
         .route("/api/graph-chunk", get(get_graph_chunk))
         .route("/api/mcp-tool/file-retrieval", post(post_file_retrieval))
+        .route("/api/mcp-tool/trace-path", post(post_trace_path))
+        .route("/api/mcp-tool/symbol-context", post(post_symbol_context))
+        .route("/api/mcp-tool/impact", post(post_impact))
         .route("/api/embedding-cache", delete(delete_embedding_cache))
         .route("/api/defender-status", get(get_defender_status))
         .route("/api/defender-exclude", post(post_defender_exclude))
@@ -1466,6 +1469,87 @@ async fn post_file_retrieval(
         req.top_k.unwrap_or(5),
         // REST parity: no caller budget; built-in 48K cap applies.
         None,
+    )
+    .await;
+    Json(json!({ "result": result })).into_response()
+}
+
+// ─── Graph-tool REST proxies ──────────────────────────────────────────────
+//
+// The same pattern as `/api/mcp-tool*` above: each endpoint runs the shared
+// read-only funnel and wraps the text in `{ "result": ... }`, so the router's
+// global `/mcp` can proxy `trace-path` / `symbol-context` / `impact` to the
+// worker that owns the repo DB (the router itself never opens a repo DB).
+
+#[derive(Deserialize)]
+struct TracePathRequest {
+    workspace_full_path: String,
+    from_symbol: String,
+    to_symbol: String,
+    direction: Option<String>,
+    max_depth: Option<usize>,
+}
+
+/// POST /api/mcp-tool/trace-path — call the trace-path funnel over HTTP.
+async fn post_trace_path(State(state): State<AppState>, Json(req): Json<TracePathRequest>) -> Response {
+    let settings = state.settings.read().await.clone();
+    let repo = crate::store::normalize_repo_path(req.workspace_full_path.trim());
+    let result = crate::mcp::run_trace_path(
+        &state.repo_dbs,
+        &state.data_dir,
+        &settings,
+        &repo,
+        &req.from_symbol,
+        &req.to_symbol,
+        req.direction.as_deref(),
+        req.max_depth,
+    )
+    .await;
+    Json(json!({ "result": result })).into_response()
+}
+
+#[derive(Deserialize)]
+struct SymbolContextRequest {
+    workspace_full_path: String,
+    symbol: String,
+}
+
+/// POST /api/mcp-tool/symbol-context — call the symbol-context funnel over HTTP.
+async fn post_symbol_context(
+    State(state): State<AppState>,
+    Json(req): Json<SymbolContextRequest>,
+) -> Response {
+    let settings = state.settings.read().await.clone();
+    let repo = crate::store::normalize_repo_path(req.workspace_full_path.trim());
+    let result = crate::mcp::run_symbol_context(
+        &state.repo_dbs,
+        &state.data_dir,
+        &settings,
+        &repo,
+        &req.symbol,
+    )
+    .await;
+    Json(json!({ "result": result })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ImpactRequest {
+    workspace_full_path: String,
+    symbol: String,
+    max_depth: Option<usize>,
+}
+
+/// POST /api/mcp-tool/impact — call the impact funnel over HTTP.
+async fn post_impact(State(state): State<AppState>, Json(req): Json<ImpactRequest>) -> Response {
+    let settings = state.settings.read().await.clone();
+    let repo = crate::store::normalize_repo_path(req.workspace_full_path.trim());
+    let result = crate::mcp::run_impact(
+        &state.repo_dbs,
+        &state.data_dir,
+        &settings,
+        &repo,
+        &req.symbol,
+        req.max_depth,
     )
     .await;
     Json(json!({ "result": result })).into_response()
