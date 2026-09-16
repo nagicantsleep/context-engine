@@ -4,7 +4,7 @@ Date: 2026-09-04
 
 ## Status
 
-Active
+Complete (2026-09-16 — all items done incl. the 1.1 lexical normalization + default-on flip; committed as 3a3ad7c)
 
 ## Outcome
 
