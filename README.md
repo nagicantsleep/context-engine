@@ -89,6 +89,7 @@ Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
 | HTTP API + Web UI | Settings management, index explorer, and a query test console |
 | MCP server | `codebase-retrieval`, `file-retrieval`, read-only graph tools `trace-path` / `symbol-context` / `impact`, and the always-on `list_repos` discovery tool |
 | Secret redaction | API keys and credentials are redacted from chunk content before it reaches the rerank LLM or any tool output |
+| Hybrid retrieval | Lexical fallback fused with vector search via weighted RRF (on by default; `CONTEXT_ENGINE_LEXICAL=0` disables) |
 | Portable graph export | `export-graph` writes nodes, edges, and per-edge confidence to a versioned JSON artifact |
 | SSE progress stream | Streams live indexing progress events to the UI |
 | Large-repo scaling | Bounded memory and no O(n²) paths — built for Linux/Chromium-scale codebases |
@@ -120,6 +121,22 @@ instead of guessing. Truncation from a depth or budget cap is stated
 explicitly, never silent. The graph tools read the repo's own call graph only —
 cross-repo callers are not followed ([decision
 0002](docs/decisions/0002-multi-repo-namespace.md)).
+
+### Hybrid retrieval (vector + lexical fusion)
+
+`codebase-retrieval` and `file-retrieval` fuse a bounded lexical scan over the
+indexed chunks with the vector search before graph expansion. The scan runs
+per-term CONTAINS pools (no new index, no schema migration), scores with
+IDF-weighted term coverage, and recognizes when a row **is** the queried
+identifier (whole-token equality, snake/camel aware): witness rows may rise to
+0.8 while mention-only rows cap at 0.55 — below the vector cosine band — so the
+fallback can never displace the vector list's top definitions. Reciprocal Rank
+Fusion (k=60, lexical rank weight 0.7) decides order only; returned scores keep
+their source meaning. Fusion is **on by default**; set
+`CONTEXT_ENGINE_LEXICAL=0` (`false`/`off`/`no`/`disabled`) to disable it on
+latency-sensitive hosts. On the 40-pair retrieval A/B it is recall-neutral
+versus the vector-only baseline (r@1/r@5/r@10/IoU identical); its guaranteed
+benefit is the vector-miss fallback (exact symbol names, rare terms).
 
 ### Secret redaction
 

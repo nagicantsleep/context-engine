@@ -47,7 +47,7 @@ use context_engine_rs::parsing::parse_file;
 use context_engine_rs::parsing::symbols::Symbol;
 
 mod eval;
-use eval::eval_set;
+use eval::build_eval_set;
 
 // ─── Output report shape ─────────────────────────────────────────────────
 
@@ -544,7 +544,7 @@ fn iou(a: (u32, u32), b: (u32, u32)) -> f64 {
 }
 
 fn run_retrieval(repo: &str, server: &str, report: &mut Report) {
-    let pairs = eval_set();
+    let pairs = build_eval_set(repo, 0);
     report.eval_pairs = pairs.len() as u64;
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -560,7 +560,10 @@ fn run_retrieval(repo: &str, server: &str, report: &mut Report) {
     let mut iou_count = 0u64;
 
     rt.block_on(async {
-        for (query, rel_file, symbol) in &pairs {
+        for pair in &pairs {
+            let query = &pair.query;
+            let rel_file = &pair.rel_file;
+            let symbol = &pair.symbol;
             let expected = match resolve_expected_range(repo, rel_file, symbol) {
                 Some(e) => e,
                 None => {

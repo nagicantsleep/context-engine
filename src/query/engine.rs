@@ -260,9 +260,10 @@ pub(crate) async fn run_query_with_filters_and_mode(
         .await;
     let search_ms = search_start.elapsed().as_millis() as u64;
 
-    // Gate-aware lexical: when enabled, an empty vector set is a fallback
-    // trigger, not an immediate empty. The DB map loads first so the lexical
-    // scan can run; only when BOTH lists are empty is the result genuine.
+    // Lexical fusion is default-on (kill-switch env only): an empty vector
+    // set is a fallback trigger, never an immediate empty. The DB map loads
+    // first so the lexical scan can run; only when BOTH lists are empty is
+    // the result genuine.
     let lexical_on = lexical_enabled();
     if raw_results.is_empty() && !lexical_on {
         return Ok(QueryResult {
@@ -308,7 +309,7 @@ pub(crate) async fn run_query_with_filters_and_mode(
         warming = true;
     }
     let mut base_chunks = fenced.kept;
-    // ── Step 3.4: Lexical fallback + RRF fusion (gated, default off) ──────
+    // ── Step 3.4: Lexical fallback + normalized RRF fusion (default on) ───
     // Lexical rows arrive fully hydrated (content/symbol from the scan), so
     // they fuse here BEFORE filters: one `apply_query_filters` pass then sees
     // the fused set. Note: lexical-only rows carry no `symbol_kind`, so a
@@ -650,6 +651,8 @@ pub(crate) async fn run_sub_query(
     if raw_results.is_empty() && !lexical_on {
         return Ok(vec![]);
     }
+    // (kill-switch check only — fusion itself is default-on; see Step 3.4 of
+    // the primary funnel for the full rationale)
 
     let filtered: Vec<_> = raw_results
         .into_iter()
@@ -663,7 +666,7 @@ pub(crate) async fn run_sub_query(
     };
 
     let mut base_chunks = hydrate_candidates(&db_map, &filtered).await.kept;
-    // Same gated fusion as the primary funnel: RRF orders, source scores
+    // Same normalized fusion as the primary funnel: RRF orders, source scores
     // survive, lexical-only fills the vector-miss fallback.
     if lexical_on {
         let lexical = lexical_candidates(&db_map, query, Some(repo_filter), top_k).await;

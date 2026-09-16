@@ -52,6 +52,7 @@ Nền tảng được hỗ trợ: Linux x64/arm64, macOS arm64, Windows x64.
 | HTTP API + Web UI | Quản lý cấu hình, index explorer và bảng điều khiển thử query |
 | MCP server | `codebase-retrieval`, `file-retrieval`, các graph tool chỉ đọc `trace-path` / `symbol-context` / `impact`, và tool khám phá `list_repos` luôn khả dụng |
 | Secret redaction | API key và thông tin xác thực được che khỏi nội dung chunk trước khi tới rerank LLM hoặc bất kỳ output nào |
+| Truy vấn lai | Fallback lexical hợp nhất với tìm kiếm vector qua RRF có trọng số (bật theo mặc định; `CONTEXT_ENGINE_LEXICAL=0` để tắt) |
 | Portable graph export | `export-graph` ghi nodes, edges và confidence từng edge ra artifact JSON có phiên bản |
 | SSE progress stream | Truyền sự kiện indexing progress trực tiếp tới UI |
 | Large-repo scaling | Bounded memory và không có đường O(n²) — xây dựng cho codebase quy mô Linux/Chromium |
@@ -82,6 +83,23 @@ Symbol chấp nhận FQN đầy đủ (`/abs/file.rs::mod::name`), `file.rs::nam
 bao giờ im lặng. Các graph tool chỉ đọc call graph của repo đó — caller
 cross-repo không được đi tiếp (theo [decision
 0002](docs/decisions/0002-multi-repo-namespace.md)).
+
+### Truy vấn lai (vector + hợp nhất lexical)
+
+`codebase-retrieval` và `file-retrieval` hợp nhất một quét lexical có giới hạn
+trên các chunk đã index với tìm kiếm vector trước khi mở rộng call graph. Quét
+chạy các pool CONTAINS theo từng term (không thêm index, không di chuyển
+schema), chấm điểm bằng độ phủ term có trọng số IDF, và nhận diện khi một row
+**chính là** identifier được truy vấn (khớp nguyên token, hiểu snake/camel):
+row witness có thể lên tới 0.8 còn row chỉ nhắc tới chạm trần 0.55 — dưới dải
+cosine của vector — nên fallback không bao giờ lấn át các định nghĩa đầu bảng
+của vector. Reciprocal Rank Fusion (k=60, trọng số hạng lexical 0.7) chỉ quyết
+định thứ tự; điểm trả về giữ nguyên ý nghĩa nguồn. Hợp nhất **bật theo mặc
+định**; đặt `CONTEXT_ENGINE_LEXICAL=0` (`false`/`off`/`no`/`disabled`) để tắt
+trên các host nhạy cảm độ trễ. Trên bài test A/B 40 cặp truy hồi, nó trung
+tính về recall so với baseline chỉ-vector (r@1/r@5/r@10/IoU giống hệt); lợi
+ích đảm bảo là fallback khi vector bỏ lỡ (tên symbol chính xác, term hiếm —
+tức là khi truy vấn theo đúng tên identifier).
 
 ### Secret redaction
 

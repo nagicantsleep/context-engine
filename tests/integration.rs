@@ -301,6 +301,130 @@ async fn test_put_repo_then_query_passes_preflight() {
     );
 }
 
+// ─── Test 4b: no-key local providers pass the REST query preflight ────────
+//
+// Parity with the MCP-path guard (run_codebase_retrieval, dbcd45c): Ollama and
+// ONNX run locally without credentials, so the `post_query` api-keys preflight
+// must reject only KEY-BASED providers. A repo-less query is the probe: it must
+// reach the repo-mandatory gate (fired before any embedding network call).
+#[tokio::test]
+async fn test_rest_query_allows_no_key_local_provider() {
+    let home = TempDir::new().expect("tempdir");
+    let repo_dir = TempDir::new().expect("repo tempdir");
+    let addr = start_server(&home).await;
+
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("client");
+
+    client
+        .get(format!("http://{addr}/api/config"))
+        .send()
+        .await
+        .expect("initial GET");
+
+    let repo_path = repo_dir.path().to_string_lossy().to_string();
+    // Ollama provider with NO keys — the documented no-key local setup.
+    let payload = serde_json::json!({
+        "version": 1,
+        "repos": [repo_path],
+        "embedding": {
+            "provider": "ollama",
+            "model": "nomic-embed-text",
+            "api_keys": []
+        },
+        "llm": {
+            "provider": "google",
+            "rerank_model": "",
+            "api_keys": []
+        }
+    });
+    let put_res = client
+        .put(format!("http://{addr}/api/config"))
+        .json(&payload)
+        .send()
+        .await
+        .expect("PUT request");
+    assert_eq!(put_res.status().as_u16(), 200, "PUT should return 200");
+
+    let query_res = client
+        .post(format!("http://{addr}/api/query"))
+        .json(&serde_json::json!({ "query": "x", "top_k": 5 }))
+        .send()
+        .await
+        .expect("query request");
+    let status = query_res.status().as_u16();
+    let body: serde_json::Value = query_res.json().await.expect("parse query response");
+    let error_msg = body["error"].as_str().unwrap_or("");
+
+    // The keys preflight must NOT fire for a no-key local provider; the request
+    // proceeds to the repo-mandatory gate (repo-less probe → 400 there).
+    assert_eq!(status, 400);
+    assert!(
+        error_msg.contains("A repository is required"),
+        "no-key ollama must pass the keys preflight, got: {error_msg}"
+    );
+}
+
+// ─── Test 4c: key-based providers are still rejected without keys ─────────
+#[tokio::test]
+async fn test_rest_query_rejects_key_provider_without_keys() {
+    let home = TempDir::new().expect("tempdir");
+    let repo_dir = TempDir::new().expect("repo tempdir");
+    let addr = start_server(&home).await;
+
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("client");
+
+    client
+        .get(format!("http://{addr}/api/config"))
+        .send()
+        .await
+        .expect("initial GET");
+
+    let repo_path = repo_dir.path().to_string_lossy().to_string();
+    let payload = serde_json::json!({
+        "version": 1,
+        "repos": [repo_path],
+        "embedding": {
+            "provider": "voyage",
+            "model": "voyage-4-lite",
+            "api_keys": []
+        },
+        "llm": {
+            "provider": "google",
+            "rerank_model": "",
+            "api_keys": []
+        }
+    });
+    let put_res = client
+        .put(format!("http://{addr}/api/config"))
+        .json(&payload)
+        .send()
+        .await
+        .expect("PUT request");
+    assert_eq!(put_res.status().as_u16(), 200, "PUT should return 200");
+
+    let query_res = client
+        .post(format!("http://{addr}/api/query"))
+        .json(&serde_json::json!({ "query": "x", "top_k": 5 }))
+        .send()
+        .await
+        .expect("query request");
+    let status = query_res.status().as_u16();
+    let body: serde_json::Value = query_res.json().await.expect("parse query response");
+    let error_msg = body["error"].as_str().unwrap_or("");
+
+    assert_eq!(status, 400);
+    assert!(
+        error_msg.contains("No embedding API keys configured"),
+        "key-based provider without keys must be rejected, got: {error_msg}"
+    );
+}
+
 // ─── Test 5: PUT a repo → register_repo fires → status entry exists ───────
 //
 // PUT a config with a real temp directory as a repo. After the PUT returns 200,

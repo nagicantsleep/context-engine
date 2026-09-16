@@ -1338,7 +1338,19 @@ async fn post_query(State(state): State<AppState>, Json(req): Json<QueryRequest>
     // A hard "index is empty" rejection here would falsely block queries to
     // populated-but-cold repos. Truly-unindexed setups simply return no results.
 
-    if settings.embedding.api_keys.is_empty() {
+    // Confirm embedding keys are present for key-based providers. Ollama and
+    // ONNX run locally without credentials (documented no-key setups) — parity
+    // with the MCP-path guard in `run_codebase_retrieval` (dbcd45c).
+    let embedding_needs_key = !matches!(
+        settings
+            .embedding
+            .provider
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "ollama" | "onnx"
+    );
+    if embedding_needs_key && settings.embedding.api_keys.is_empty() {
         let body = json!({ "error": "No embedding API keys configured." });
         return (StatusCode::BAD_REQUEST, Json(body)).into_response();
     }
@@ -1491,7 +1503,10 @@ struct TracePathRequest {
 }
 
 /// POST /api/mcp-tool/trace-path — call the trace-path funnel over HTTP.
-async fn post_trace_path(State(state): State<AppState>, Json(req): Json<TracePathRequest>) -> Response {
+async fn post_trace_path(
+    State(state): State<AppState>,
+    Json(req): Json<TracePathRequest>,
+) -> Response {
     let settings = state.settings.read().await.clone();
     let repo = crate::store::normalize_repo_path(req.workspace_full_path.trim());
     let result = crate::mcp::run_trace_path(

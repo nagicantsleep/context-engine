@@ -19,26 +19,50 @@
 # against each via `chunk_bench --ab`. Ground-truth is chunker-independent (frozen
 # parse_file symbol extraction, unchanged vs HEAD), so the comparison is fair.
 #
+# NOTE: the repo under test MUST already be registered in the home-anchored
+# settings (`settings.repos`) — the script checks this up front and exits with
+# guidance instead of failing deep inside the rebuild poll. Register it first,
+# e.g. via the Web UI, or `context-engine setup --repo <PATH>` against the
+# already-configured engine.
+#
 # Output: ab_benchmark.json with both rows side by side + deltas + run metadata.
 #
 # Usage:
 #   scripts/ab_bench.sh [repo_path] [out_json]
 # Defaults:
-#   repo_path = d:/projects/cpp/notepad-ade
+#   repo_path = the repository containing this script
 #   out_json  = ab_benchmark.json (in CWD)
+#
+# Cross-platform by default; every Windows-specific value from the original
+# version is now an overridable env var with a platform-appropriate default:
+#   LEGACY_WT   worktree for the legacy build (default: <repo>/.ce-legacy-worktree)
+#   TMP_ROOT    scratch dir for data dirs + logs (default: ${TMPDIR:-/tmp}/ce_ab_bench)
+#   LIBCLANG_PATH  Windows-only build prerequisite (set automatically on Windows)
 set -euo pipefail
+bash -n "$0" # syntax self-check; aborts here on any parse error
 
-REPO="${1:-d:/projects/cpp/notepad-ade}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NEW_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+REPO="${1:-$NEW_DIR}"
 OUT="${2:-ab_benchmark.json}"
 
 # Resolve absolute output path before any cd.
 OUT_ABS="$(cd "$(dirname "$OUT")" 2>/dev/null && pwd)/$(basename "$OUT")" || OUT_ABS="$PWD/$OUT"
 
-export LIBCLANG_PATH="${LIBCLANG_PATH:-/c/Program Files/LLVM/bin}"
+# Platform detection: MSYS/Git-Bash on Windows hosts needs Windows-native paths
+# for the native binary's --data-dir and a backslash-lowercase repo normalization.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) ON_WINDOWS=1 ;;
+  *)                    ON_WINDOWS=0 ;;
+esac
+
+if [ "$ON_WINDOWS" = 1 ]; then
+  export LIBCLANG_PATH="${LIBCLANG_PATH:-/c/Program Files/LLVM/bin}"
+fi
 
 # Repo paths (this script lives in context-engine-rs/scripts/).
-NEW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LEGACY_WT="${LEGACY_WT:-D:/projects/Python/ce-legacy-wt}"
+LEGACY_WT="${LEGACY_WT:-$NEW_DIR/.ce-legacy-worktree}"
 
 LEGACY_PORT="${LEGACY_PORT:-7801}"
 NEW_PORT="${NEW_PORT:-7802}"
@@ -46,19 +70,33 @@ LEGACY_URL="http://127.0.0.1:${LEGACY_PORT}"
 NEW_URL="http://127.0.0.1:${NEW_PORT}"
 
 # Isolated temp data dirs (RocksDB only — embedding cache stays home-anchored).
-# Use a Windows-native path (not an MSYS /tmp path) so the native binary can use
-# it directly as --data-dir.
-TMP_ROOT="${TMP_ROOT:-D:/projects/Python/ce_ab_tmp}"
+# TMPDIR is already Windows-native under MSYS when the native binary needs it to
+# be; overridable for hosts where it is not.
+TMP_ROOT="${TMP_ROOT:-${TMPDIR:-/tmp}/ce_ab_bench}"
 LEGACY_DATA="${TMP_ROOT}/legacy"
 NEW_DATA="${TMP_ROOT}/new"
 rm -rf "$TMP_ROOT" 2>/dev/null || true
 mkdir -p "$LEGACY_DATA" "$NEW_DATA"
 
-LEGACY_BIN="${LEGACY_WT}/target/release/context-engine-rs.exe"
-NEW_BIN="${NEW_DIR}/target/release/context-engine-rs.exe"
+EXE_SUFFIX=""
+if [ "$ON_WINDOWS" = 1 ]; then EXE_SUFFIX=".exe"; fi
 
-# repo_id = urlsafe-base64(no-pad) of the normalized (lowercased, backslash) path.
-norm_repo() { printf '%s' "$1" | tr '/' '\\' | tr 'A-Z' 'a-z'; }
+LEGACY_BIN="${LEGACY_WT}/target/release/context-engine-rs${EXE_SUFFIX}"
+NEW_BIN="${NEW_DIR}/target/release/context-engine-rs${EXE_SUFFIX}"
+
+# repo_id = urlsafe-base64(no-pad) of the normalized repo path. Normalization
+# MUST byte-match `store::normalize_repo_path` (src/store/mod.rs):
+#   Windows: separators → backslash, lowercased; elsewhere: separators → forward slash.
+# Trailing separators are trimmed on every platform.
+norm_repo() {
+  local p="$1"
+  while [[ "$p" == */ || "$p" == *\\ ]]; do p="${p%/}"; p="${p%\\}"; done
+  if [ "$ON_WINDOWS" = 1 ]; then
+    printf '%s' "$p" | tr '/' '\\' | tr 'A-Z' 'a-z'
+  else
+    printf '%s' "$p" | tr '\\' '/'
+  fi
+}
 REPO_NORM="$(norm_repo "$REPO")"
 REPO_ID="$(printf '%s' "$REPO_NORM" | base64 | tr '+/' '-_' | tr -d '=')"
 
@@ -122,6 +160,15 @@ echo "[ab_bench] repo=${REPO}  repo_id=${REPO_ID}"
 echo "[ab_bench] legacy_bin=${LEGACY_BIN}"
 echo "[ab_bench] new_bin=${NEW_BIN}"
 
+# ── Preflight: the repo path must exist ──────────────────────────────────────
+# (Registration in settings.repos is verified AFTER the new server is up —
+# see the check following the boot phase.)
+if [ ! -d "$REPO" ]; then
+  echo "[ab_bench] ERROR: repo path does not exist: $REPO" >&2
+  echo "[ab_bench] pass the repo as the first argument: scripts/ab_bench.sh /path/to/repo [out.json]" >&2
+  exit 1
+fi
+
 # ── Provision the legacy build (git HEAD = pre-cAST chunker) if missing ──────
 # Design B needs a binary built from the SUBMODULE's git HEAD. We isolate it in a
 # detached-HEAD worktree so the working tree's uncommitted cAST change is never
@@ -129,7 +176,8 @@ echo "[ab_bench] new_bin=${NEW_BIN}"
 if [ ! -x "$LEGACY_BIN" ]; then
   echo "[ab_bench] legacy binary missing — provisioning worktree + build ..."
   HEAD_SHA="$(git -C "$NEW_DIR" rev-parse HEAD)"
-  if ! git -C "$NEW_DIR" worktree list | grep -qiF "$(printf '%s' "$LEGACY_WT" | tr '/' '\\')"; then
+  # git prints Windows-native paths; compare with separators normalized both ways.
+  if ! git -C "$NEW_DIR" worktree list | sed 's,\\,/,g' | grep -qiF "$(printf '%s' "$LEGACY_WT" | tr '\\' '/')"; then
     git -C "$NEW_DIR" worktree add -d "$LEGACY_WT" "$HEAD_SHA"
   fi
   ( cd "$LEGACY_WT" && cargo build --release --bin context-engine-rs )
@@ -159,6 +207,22 @@ NEW_PID=$!
 wait_up "$LEGACY_URL"
 wait_up "$NEW_URL"
 
+# ── Preflight: the repo must be registered in the home-anchored settings ─────
+# The rebuild trigger and its poll both key off this repo; if it is not in
+# settings.repos the per-repo status stays empty forever and the run dies in the
+# 30-minute poll instead of right here with guidance. Needs a live server, so
+# this check runs right after boot.
+REG_CHECK="$(curl -fsS "${NEW_URL}/api/index-status" 2>/dev/null || true)"
+if [ -z "$REG_CHECK" ]; then
+  echo "[ab_bench] ERROR: could not read ${NEW_URL}/api/index-status" >&2
+  exit 1
+fi
+if ! printf '%s' "$REG_CHECK" | grep -qF "\"repo\":\"$REPO_NORM\""; then
+  echo "[ab_bench] ERROR: repo '$REPO_NORM' is not registered in the engine's settings.repos" >&2
+  echo "[ab_bench] register it first (Web UI, or 'context-engine setup --repo $REPO' against the configured engine), then re-run." >&2
+  exit 1
+fi
+
 # ── Trigger fresh full rebuilds (force_rebuild) of the repo on each ──────────
 echo "[ab_bench] triggering rebuild on legacy ..."
 curl -fsS -X POST "${LEGACY_URL}/api/repos/${REPO_ID}/rebuild" >/dev/null
@@ -172,7 +236,7 @@ wait_indexed "$NEW_URL" "new"
 
 # ── Run the identical harness + query path against each, emit A/B artifact ───
 echo "[ab_bench] running chunk_bench --ab ..."
-CHUNK_BENCH="${NEW_DIR}/target/release/chunk_bench.exe"
+CHUNK_BENCH="${NEW_DIR}/target/release/chunk_bench${EXE_SUFFIX}"
 if [ ! -x "$CHUNK_BENCH" ]; then
   cd "$NEW_DIR" && cargo build --release --bin chunk_bench
 fi

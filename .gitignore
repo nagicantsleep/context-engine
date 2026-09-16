@@ -8,3 +8,10 @@ scripts/bin/harness.exe
 .claude/worktrees/
 
 .agents/skills/onboard-repository/scripts/__pycache__/
+
+# Retrieval-benchmark sandbox (home-anchored settings + RocksDB data dir + logs)
+.ce-bench-sandbox/
+
+# ab_bench.sh legacy-build worktree cache + A/B output artifacts
+.ce-legacy-worktree/
+ab_benchmark*.json

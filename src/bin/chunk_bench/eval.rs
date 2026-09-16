@@ -1,15 +1,137 @@
 //! Retrieval eval set for the chunking-quality benchmark.
 //!
-//! ~40 (query, expected_file, expected_symbol) triples derived from the
-//! notepad-ade source. The expected line range is NOT hardcoded — it is
-//! resolved at run time from the symbol name via the FROZEN extraction
-//! (`parse_file`), so the eval set is independent of any chunk boundary and
-//! cannot favour either chunker. Each query is phrased as a natural-language
-//! intent a developer would type, not as the literal symbol name.
+//! Two sources, tried in order:
+//!
+//! 1. `eval_set()` — ~40 curated (query, expected_file, expected_symbol)
+//!    triples derived from the notepad-ade source (the harness's original
+//!    target). The expected line range is NOT hardcoded — it is resolved at
+//!    run time from the symbol name via the FROZEN extraction (`parse_file`),
+//!    so the eval set is independent of any chunk boundary and cannot favour
+//!    either chunker. Each query is phrased as a natural-language intent a
+//!    developer would type, not as the literal symbol name.
+//! 2. `derive_eval_set(repo)` — automatic fallback for ANY OTHER repo: walks
+//!    the repo with the same walker the chunk metrics use, picks Function and
+//!    Method symbols (the same kinds the cut-through metric reasons about),
+//!    and phrases each as a keyword query from the symbol name plus enclosing
+//!    scope. Ground truth resolves through the same frozen `parse_file` path,
+//!    so the chunker-independence guarantee holds for derived pairs too.
 //!
 //! `expected_file` is relative to the repo root and uses forward slashes.
 
-/// Returns the (query, relative_file, symbol_name) eval triples.
+use std::collections::HashSet;
+
+use context_engine_rs::indexing::walker::walk_repo;
+use context_engine_rs::parsing::parse_file;
+use context_engine_rs::parsing::symbols::SymbolKind;
+
+/// A (query, relative_file, symbol_name) eval triple.
+pub struct EvalPair {
+    pub query: String,
+    pub rel_file: String,
+    pub symbol: String,
+}
+
+/// Build the eval set for `repo`: the curated notepad-ade set when the repo
+/// actually contains those files, otherwise a derived set from the repo's own
+/// Function/Method symbols. `cap` bounds the derived set size (0 = default 40).
+pub fn build_eval_set(repo: &str, cap: usize) -> Vec<EvalPair> {
+    let curated_ok = !eval_set().is_empty()
+        && std::fs::exists(repo.trim_end_matches(['/', '\\']).to_string() + "/" + eval_set()[0].1)
+            .map(|ok| ok)
+            .unwrap_or(false);
+    if curated_ok {
+        return eval_set()
+            .into_iter()
+            .map(|(q, f, s)| EvalPair {
+                query: q.to_string(),
+                rel_file: f.to_string(),
+                symbol: s.to_string(),
+            })
+            .collect();
+    }
+    let cap = if cap == 0 { 40 } else { cap };
+    derive_eval_set(repo, cap)
+}
+
+/// Derive (query, relative_file, symbol_name) triples from the repo's own
+/// Function/Method symbols. Query = scope names + snake/camel-split symbol
+/// name (deterministic, no thesaurus), which is exactly the kind of
+/// identifier-anchored intent the curated set models. `cap` bounds the count.
+pub fn derive_eval_set(repo: &str, cap: usize) -> Vec<EvalPair> {
+    let root = repo.trim_end_matches(['/', '\\']).to_string();
+    let files = walk_repo(&root);
+    let mut pairs: Vec<EvalPair> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for path in &files {
+        if pairs.len() >= cap {
+            break;
+        }
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if source.contains('\0') {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .trim_start_matches('/')
+            .replace('\\', "/")
+            .to_string();
+        let parsed = parse_file(path, &source);
+        for s in &parsed.symbols {
+            if !matches!(s.kind, SymbolKind::Function | SymbolKind::Method) {
+                continue;
+            }
+            if !seen.insert(s.qualified.name.clone()) {
+                continue;
+            }
+            let mut words: Vec<String> = s
+                .qualified
+                .scope_path
+                .iter()
+                .map(|w| split_identifier(w))
+                .collect();
+            words.push(split_identifier(&s.qualified.name));
+            let query = words.join(" ");
+            pairs.push(EvalPair {
+                query,
+                rel_file: rel.clone(),
+                symbol: s.qualified.name.clone(),
+            });
+            if pairs.len() >= cap {
+                break;
+            }
+        }
+    }
+    pairs
+}
+
+/// Split an identifier into lowercase words at camelCase humps and around
+/// underscores (e.g. `nextFireTimes` → `next fire times`).
+fn split_identifier(name: &str) -> String {
+    let mut spaced = String::with_capacity(name.len() + 8);
+    let mut prev: Option<char> = None;
+    for c in name.chars() {
+        if let Some(p) = prev
+            && (p.is_lowercase() || p.is_ascii_digit())
+            && c.is_uppercase()
+        {
+            spaced.push(' ');
+        }
+        spaced.push(c);
+        prev = Some(c);
+    }
+    spaced
+        .split(['_', '-', '.'])
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Returns the curated (query, relative_file, symbol_name) eval triples.
 pub fn eval_set() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         // CronExpression.cpp

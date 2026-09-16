@@ -49,6 +49,7 @@ context-engine --port 6699
 | HTTP API + Web 界面 | 配置管理、索引浏览器和查询测试控制台 |
 | MCP 服务器 | `codebase-retrieval`、`file-retrieval`、只读图谱工具 `trace-path` / `symbol-context` / `impact`，以及始终可用的发现工具 `list_repos` |
 | 密钥脱敏 | 在内容进入重排 LLM 或任何工具输出之前，先从 chunk 内容中脱敏 API 密钥和凭据 |
+| 混合检索 | 词法回退通过加权 RRF 与向量检索融合（默认开启；`CONTEXT_ENGINE_LEXICAL=0` 关闭） |
 | 可移植图谱导出 | `export-graph` 将节点、边及每条边的置信度写入带版本的 JSON 产物 |
 | SSE 进度流 | 将实时索引进度事件流式传输到界面 |
 | 大型仓库扩展 | 内存有界且无 O(n²) 路径 —— 为 Linux/Chromium 规模的代码库而构建 |
@@ -75,6 +76,19 @@ context-engine --port 6699
 名称；歧义引用会返回候选列表而不是猜测。触及深度或预算上限而截断时一定会明
 确说明，绝不静默。图谱工具只读取该仓库自己的调用图 —— 不跟随跨仓库调用者
 （见 [decision 0002](docs/decisions/0002-multi-repo-namespace.md)）。
+
+### 混合检索（向量 + 词法融合）
+
+`codebase-retrieval` 和 `file-retrieval` 会在图扩展之前，把对已索引 chunk 的
+有界词法扫描与向量检索融合。扫描按 term 运行 CONTAINS 池（不加索引、不做
+schema 迁移），用 IDF 加权的 term 覆盖度打分，并识别某一行**就是**被查询的
+标识符（整 token 相等，兼容 snake/camel）：witness 行可达 0.8，仅提及的行封
+顶 0.55 —— 低于向量余弦带 —— 因此前备永远无法挤掉向量列表头部的定义。
+Reciprocal Rank Fusion（k=60，词法秩权重 0.7）只决定顺序；返回分数保留源含
+义。融合**默认开启**；在延迟敏感的主机上可设置
+`CONTEXT_ENGINE_LEXICAL=0`（`false`/`off`/`no`/`disabled`）关闭。在 40 对检
+索 A/B 中它与纯向量基线 recall 持平（r@1/r@5/r@10/IoU 完全一致）；其确定性
+收益是向量失手时的回退兜底（精确符号名、罕见词）。
 
 ### 密钥脱敏
 
