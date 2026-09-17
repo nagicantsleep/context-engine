@@ -28,6 +28,9 @@ fn vector_only_fast_path_only_for_resolve_edges() {
     assert!(!readiness::is_resolve_edges_status(None));
 }
 
+// build_db_key emits native separators (cfg!(windows)-dependent), so the
+// Windows-separator assertions below only hold on Windows hosts.
+#[cfg(windows)]
 #[test]
 fn file_retrieval_db_key_windows_backslash_input() {
     let repo = r"D:\projects\Python\local-context-engine";
@@ -39,6 +42,7 @@ fn file_retrieval_db_key_windows_backslash_input() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn file_retrieval_db_key_forward_slash_input() {
     let repo = r"D:\projects\Python\local-context-engine";
@@ -50,6 +54,7 @@ fn file_retrieval_db_key_forward_slash_input() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn file_retrieval_db_key_mixed_slashes() {
     let repo = r"D:\projects\Python\local-context-engine";
@@ -61,6 +66,7 @@ fn file_retrieval_db_key_mixed_slashes() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn file_retrieval_db_key_leading_slash_in_file_path() {
     let repo = r"D:\projects\Python\local-context-engine";
@@ -72,6 +78,7 @@ fn file_retrieval_db_key_leading_slash_in_file_path() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn file_retrieval_db_key_leading_backslash_in_file_path() {
     let repo = r"D:\projects\Python\local-context-engine";
@@ -83,6 +90,7 @@ fn file_retrieval_db_key_leading_backslash_in_file_path() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn file_retrieval_db_key_trailing_slash_in_workspace() {
     let repo = r"D:\projects\Python\local-context-engine\";
@@ -94,6 +102,7 @@ fn file_retrieval_db_key_trailing_slash_in_workspace() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn file_retrieval_db_key_both_edge_cases() {
     let repo = r"D:\projects\Python\local-context-engine/";

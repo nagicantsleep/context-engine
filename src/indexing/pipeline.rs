@@ -1430,6 +1430,24 @@ impl IndexPipeline {
             });
         }
 
+        // Incremental Phase 2 repaired the calls graph from a durable raw_edge
+        // state — the graph is consistent again, so (re)stamp the marker the
+        // no-change crash-recovery branch keys on. Without this, any run that
+        // removed the marker (rollback_published_vectors, store maintenance,
+        // real crash) leaves it unset forever: the next no-change run sees
+        // raw_edge non-empty and "replays Phase 2" on EVERY run instead of
+        // short-circuiting (observed as an evergreen replay on POSIX).
+        if let Err(e) = set_meta(db, EDGES_RESOLVED_KEY, "1")
+            .await
+            .context("incremental_run: stamp edges_resolved marker")
+        {
+            if let Some(key) = identity_key {
+                self.rollback_published_vectors(db, vector_index, key, pre_publish_generation)
+                    .await;
+            }
+            return Err(e);
+        }
+
         // LAST commit marker for the incremental path, after changed chunks,
         // file_meta, and resolved edges are durable.
         if let Some(key) = identity_key
