@@ -17,4 +17,5 @@ scripts/bin/harness.exe
 ab_benchmark*.json
 
 # Release binaries are built fresh by CI (npm publish workflow), never committed
-npm/*/bin/
+npm/*/bin/context-engine-rs
+npm/*/bin/context-engine-rs.exe
