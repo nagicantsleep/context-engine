@@ -50,10 +50,12 @@ Nền tảng được hỗ trợ: Linux x64/arm64, macOS arm64, Windows x64.
 | LLM rerank | Sắp xếp lại các candidate chunk bằng LLM (OpenAI / Google); tùy chọn, có thể tắt |
 | Embedded SurrealDB | Lưu chunk, symbol và edge; một datastore cho mỗi repo |
 | HTTP API + Web UI | Quản lý cấu hình, index explorer và bảng điều khiển thử query |
-| MCP server | `codebase-retrieval`, `file-retrieval`, các graph tool chỉ đọc `trace-path` / `symbol-context` / `impact`, và tool khám phá `list_repos` luôn khả dụng |
+| MCP server | `codebase-retrieval`, `file-retrieval` (opt-in), các graph tool chỉ đọc `trace-path` / `symbol-context` / `impact` / `changes-impact`, prompt hướng dẫn, và tool khám phá `list_repos` luôn khả dụng |
 | Secret redaction | API key và thông tin xác thực được che khỏi nội dung chunk trước khi tới rerank LLM hoặc bất kỳ output nào |
 | Truy vấn lai | Fallback lexical hợp nhất với tìm kiếm vector qua RRF có trọng số (bật theo mặc định; `CONTEXT_ENGINE_LEXICAL=0` để tắt) |
-| Portable graph export | `export-graph` ghi nodes, edges và confidence từng edge ra artifact JSON có phiên bản |
+| Portable graph export | `export-graph` ghi nodes, edges và confidence từng edge ra artifact JSON có phiên bản (hoặc sơ đồ Mermaid qua `--format mermaid`) |
+| Graph view | Trang `/graph.html` tự chứa vẽ graph lạnh có giới hạn thành SVG tương tác — không phụ thuộc JS ngoài |
+| Area guidance | `export-areas` suy ra các area chức năng từ call graph (thành phần liên thông, không LLM) và ghi file hướng dẫn agent theo từng area |
 | SSE progress stream | Truyền sự kiện indexing progress trực tiếp tới UI |
 | Large-repo scaling | Bounded memory và không có đường O(n²) — xây dựng cho codebase quy mô Linux/Chromium |
 
@@ -61,12 +63,15 @@ Nền tảng được hỗ trợ: Linux x64/arm64, macOS arm64, Windows x64.
 
 Cả hai MCP endpoint — `/mcp` toàn cục (truyền đường dẫn tuyệt đối
 `workspace_full_path` ở mỗi lần gọi) và từng `/mcp-repo/<name>` theo repo
-(workspace được gắn sẵn) — expose cùng một bộ tool. Cấu hình mới chỉ bật
-`codebase-retrieval`; `file-retrieval`, `trace-path`, `symbol-context` và
-`impact` là opt-in qua `enabled_mcp_tools` trong settings (hoặc Web UI).
-`list_repos` luôn được expose, vì việc khám phá không được phụ thuộc vào
-opt-in. Trên endpoint toàn cục, các tool gắn với repo được chuyển tiếp tới
-worker của repo đó, nên output giống hệt per-repo endpoint:
+(workspace được gắn sẵn) — expose cùng một bộ tool. Cấu hình mới bật sẵn
+`codebase-retrieval` và các graph tool chỉ đọc (`trace-path`, `symbol-context`,
+`impact`, `changes-impact`); riêng `file-retrieval` vẫn là opt-in qua
+`enabled_mcp_tools` trong settings (hoặc Web UI). `list_repos` luôn được
+expose, vì việc khám phá không được phụ thuộc vào opt-in. Cả hai endpoint cũng
+cung cấp hai MCP prompt (`detect-impact`, `generate-map`) và resource chỉ đọc
+`ce://repos` (chính là nội dung `list_repos` in ra — việc đọc không bao giờ
+spawn worker). Trên endpoint toàn cục, các tool gắn với repo được chuyển tiếp
+tới worker của repo đó, nên output giống hệt per-repo endpoint:
 
 | Tool | Tham số chính | Mục đích |
 |------|---------------|---------|
@@ -76,6 +81,7 @@ worker của repo đó, nên output giống hệt per-repo endpoint:
 | `trace-path` | `workspace_full_path`, `from_symbol`, `to_symbol`, tùy chọn `direction` (`callees`/`callers`), `max_depth` (mặc định 5, giới hạn 10) | Đường gọi giữa hai symbol; edge extracted được ưu tiên hơn edge inferred |
 | `symbol-context` | `workspace_full_path`, `symbol` | Nguồn định nghĩa đánh số dòng cùng tóm tắt caller/callee của một symbol |
 | `impact` | `workspace_full_path`, `symbol`, tùy chọn `max_depth` (mặc định 3, giới hạn 8) | Duyệt call-graph ngược theo tầng caller, kèm tóm tắt các file bị ảnh hưởng nhiều nhất |
+| `changes-impact` | `workspace_full_path`, tùy chọn `git_diff`, tùy chọn `max_depth` (mặc định 2, giới hạn 5) | Map các dòng ADDED của một unified diff lên symbol đã index và liệt kê caller bị ảnh hưởng; bỏ qua `git_diff` thì engine tự chạy `git diff HEAD` trong repo |
 
 Symbol chấp nhận FQN đầy đủ (`/abs/file.rs::mod::name`), `file.rs::name`,
 `::name`, hoặc tên trần; tham chiếu mơ hồ sẽ trả về danh sách candidate thay vì
@@ -120,7 +126,11 @@ redaction có tính idempotent.
 context-engine setup --repo /duong/dan/toi/repo [--tool claude,codex,opencode|all] [--port 6699] [--bind 127.0.0.1] [--url https://proxy]
 
 # Xuất call graph ra artifact JSON di động (context-engine-graph/v1)
-context-engine export-graph --repo /duong/dan/toi/repo [--out graph.json] [--max-nodes N] [--max-edges N]
+context-engine export-graph --repo /duong/dan/toi/repo [--format json|mermaid] [--out graph.json] [--max-nodes N] [--max-edges N]
+
+# Ghi các file hướng dẫn theo area từ call graph (thành phần liên thông —
+# tất định, không LLM, không clustering)
+context-engine export-areas --repo /duong/dan/toi/repo [--out-dir areas] [--max-area-size N]
 ```
 
 ### Nhà cung cấp embedding

@@ -50,6 +50,7 @@ const GITIGNORED_CONFIGS: &[&str] = &[
     "opencode.json",
     ".claude/settings.local.json",
     ".mcp.json",
+    ".cursor/mcp.json",
 ];
 
 // ─── Target tool ─────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ pub enum Target {
     Claude,
     Codex,
     Opencode,
+    Cursor,
 }
 
 impl Target {
@@ -68,6 +70,7 @@ impl Target {
             "claude" => Some(Target::Claude),
             "codex" => Some(Target::Codex),
             "opencode" => Some(Target::Opencode),
+            "cursor" => Some(Target::Cursor),
             _ => None,
         }
     }
@@ -78,11 +81,40 @@ impl Target {
             Target::Claude => "claude",
             Target::Codex => "codex",
             Target::Opencode => "opencode",
+            Target::Cursor => "cursor",
         }
     }
 
     /// Every target, in the order `--tool all` expands to.
-    pub const ALL: [Target; 3] = [Target::Claude, Target::Codex, Target::Opencode];
+    pub const ALL: [Target; 4] = [
+        Target::Claude,
+        Target::Codex,
+        Target::Opencode,
+        Target::Cursor,
+    ];
+
+    /// Marker file that suggests this tool is in use in the repo (auto-detect).
+    /// Checked against the repo root; the first hit wins, `--tool` wins over
+    /// detection.
+    fn marker_files(self) -> &'static [&'static str] {
+        match self {
+            Target::Claude => &["CLAUDE.md", ".claude/settings.local.json"],
+            Target::Codex => &[".codex/config.toml"],
+            Target::Opencode => &["opencode.json"],
+            Target::Cursor => &[".cursor/mcp.json", ".cursorrules"],
+        }
+    }
+}
+
+/// Detect installed agent tooling for a repo: targets whose marker file exists
+/// in the repo root, in `Target::ALL` order. Empty when nothing matches — the
+/// caller then falls back to `--tool all` (the previous behavior).
+pub fn detect_targets(repo_root: &Path) -> Vec<Target> {
+    Target::ALL
+        .iter()
+        .copied()
+        .filter(|t| t.marker_files().iter().any(|m| repo_root.join(m).exists()))
+        .collect()
 }
 
 /// Parse a CLI `--tool` spec: `all` (case-insensitive) or a comma-separated
@@ -211,6 +243,10 @@ pub fn run_setup(
         ],
         Target::Opencode => vec![
             write_opencode_json(repo_root, endpoint_url),
+            write_prompt_file(repo_root, "AGENTS.md", enabled_tools),
+        ],
+        Target::Cursor => vec![
+            write_cursor_mcp_json(repo_root, endpoint_url),
             write_prompt_file(repo_root, "AGENTS.md", enabled_tools),
         ],
     };
@@ -443,6 +479,43 @@ fn ensure_gitignored(repo_root: &Path, entries: &[&str]) -> FileAction {
         },
         Err(e) => error_action(REL, e),
     }
+}
+
+// ─── Cursor: .cursor/mcp.json ──────────────────────────────────────────────
+
+/// Merge `mcpServers.codebase-retrieval = { url }` into `.cursor/mcp.json`
+/// (Cursor's documented project-scoped remote-MCP shape). Same merge rules as
+/// the other JSON writers: parse-fail → error + untouched; the server entry is
+/// replaced only when it differs.
+fn write_cursor_mcp_json(repo_root: &Path, endpoint_url: &str) -> FileAction {
+    const REL: &str = ".cursor/mcp.json";
+    let path = match safe_join(repo_root, REL) {
+        Ok(p) => p,
+        Err(e) => return error_action(REL, e),
+    };
+    let existed = path.exists();
+    let mut root = match read_json_object(&path) {
+        Ok(Some(obj)) => obj,
+        Ok(None) => Map::new(),
+        Err(e) => return error_action(REL, e),
+    };
+    let mut changed = false;
+
+    let mcp = root
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(mcp) = mcp.as_object_mut() else {
+        return error_action(REL, "`mcpServers` exists but is not an object".to_string());
+    };
+
+    let mut desired = Map::new();
+    desired.insert("url".into(), Value::String(endpoint_url.to_string()));
+    if mcp.get(SERVER_NAME) != Some(&Value::Object(desired.clone())) {
+        changed = true;
+    }
+    mcp.insert(SERVER_NAME.into(), Value::Object(desired));
+
+    commit_json(&path, REL, &root, existed, changed)
 }
 
 // ─── Opencode: opencode.json ───────────────────────────────────────────────
@@ -1005,7 +1078,12 @@ mod tests {
     fn tool_list_all_expands_to_every_target() {
         assert_eq!(
             parse_tool_list("all").unwrap(),
-            vec![Target::Claude, Target::Codex, Target::Opencode]
+            vec![
+                Target::Claude,
+                Target::Codex,
+                Target::Opencode,
+                Target::Cursor
+            ]
         );
         // Case-insensitive: it is a CLI flag value.
         assert_eq!(parse_tool_list("ALL").unwrap(), Target::ALL.to_vec());
@@ -1019,6 +1097,39 @@ mod tests {
         );
         // Target::parse is exact-lowercase; mixed case names are invalid.
         assert!(parse_tool_list("Claude").is_err());
+    }
+
+    #[test]
+    fn detect_targets_reads_marker_files_and_cursor_writes_merge_cleanly() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert!(
+            detect_targets(dir.path()).is_empty(),
+            "no markers → no detection"
+        );
+
+        std::fs::create_dir_all(dir.path().join(".cursor")).unwrap();
+        std::fs::write(dir.path().join(".cursor/mcp.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "notes").unwrap();
+        let detected = detect_targets(dir.path());
+        assert_eq!(detected, vec![Target::Claude, Target::Cursor]);
+
+        // The Cursor writer merges into the existing file without clobbering
+        // unrelated servers and is idempotent.
+        let actions = run_setup(dir.path(), Target::Cursor, URL, &both_tools());
+        // The marker file already existed (it triggered detection), so this is
+        // an update of the existing file, not a create.
+        assert_eq!(status_of(&actions, ".cursor/mcp.json"), FileStatus::Updated);
+        let raw = std::fs::read_to_string(dir.path().join(".cursor/mcp.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            v["mcpServers"]["codebase-retrieval"]["url"],
+            serde_json::json!(URL)
+        );
+        let actions2 = run_setup(dir.path(), Target::Cursor, URL, &both_tools());
+        assert_eq!(
+            status_of(&actions2, ".cursor/mcp.json"),
+            FileStatus::Unchanged
+        );
     }
 
     #[test]

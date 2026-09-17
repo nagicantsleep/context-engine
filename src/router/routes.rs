@@ -1,6 +1,7 @@
 fn build_http_routes() -> Router<RouterState> {
     Router::new()
         .route("/", get(crate::assets::serve_index))
+        .route("/graph.html", get(crate::assets::serve_graph_page))
         .route("/assets/fonts/:name", get(crate::assets::serve_font))
         .route("/api/config", get(get_config).put(put_config))
         .route("/api/repos", get(list_repos))

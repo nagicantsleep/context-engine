@@ -280,6 +280,7 @@ fn build_router_inner(
 
     Router::new()
         .route("/", get(crate::assets::serve_index))
+        .route("/graph.html", get(crate::assets::serve_graph_page))
         .route("/assets/fonts/:name", get(crate::assets::serve_font))
         .route("/api/config", get(get_config))
         .route("/api/config", put(put_config))
@@ -317,6 +318,7 @@ fn build_router_inner(
         .route("/api/mcp-tool/trace-path", post(post_trace_path))
         .route("/api/mcp-tool/symbol-context", post(post_symbol_context))
         .route("/api/mcp-tool/impact", post(post_impact))
+        .route("/api/mcp-tool/changes-impact", post(post_changes_impact))
         .route("/api/embedding-cache", delete(delete_embedding_cache))
         .route("/api/defender-status", get(get_defender_status))
         .route("/api/defender-exclude", post(post_defender_exclude))
@@ -1564,6 +1566,37 @@ async fn post_impact(State(state): State<AppState>, Json(req): Json<ImpactReques
         &settings,
         &repo,
         &req.symbol,
+        req.max_depth,
+    )
+    .await;
+    Json(json!({ "result": result })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ChangesImpactRequest {
+    workspace_full_path: String,
+    #[serde(default)]
+    git_diff: Option<String>,
+    #[serde(default)]
+    max_depth: Option<usize>,
+}
+
+/// POST /api/mcp-tool/changes-impact — map a unified diff onto indexed symbols
+/// and report affected callers. The git fallback runs here, inside the worker
+/// that owns the repo's RocksDB LOCK, so it sees the same checkout the index
+/// was built from.
+async fn post_changes_impact(
+    State(state): State<AppState>,
+    Json(req): Json<ChangesImpactRequest>,
+) -> Response {
+    let settings = state.settings.read().await.clone();
+    let repo = crate::store::normalize_repo_path(req.workspace_full_path.trim());
+    let result = crate::mcp::run_changes_impact(
+        &state.repo_dbs,
+        &state.data_dir,
+        &settings,
+        &repo,
+        req.git_diff.as_deref(),
         req.max_depth,
     )
     .await;

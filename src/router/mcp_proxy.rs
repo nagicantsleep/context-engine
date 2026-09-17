@@ -27,8 +27,14 @@
 use rmcp::{
     ErrorData, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    model::{
+        CallToolResult, Content, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
+        ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult,
+        ServerCapabilities, ServerInfo,
+    },
+    schemars,
+    service::{RequestContext, RoleServer},
+    tool, tool_handler, tool_router,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -129,6 +135,7 @@ const GATED_TOOLS: &[&str] = &[
     "trace-path",
     "symbol-context",
     "impact",
+    "changes-impact",
 ];
 
 fn apply_tool_gate(router: &mut ToolRouter<ProxyMcpHandler>, enabled_tools: &[String]) {
@@ -272,10 +279,9 @@ impl ProxyMcpHandler {
             "workspace_full_path": args.workspace_full_path,
             "symbol": args.symbol,
         });
-        let text =
-            forward_json_to_worker(&self.proxy, &repo, "/api/mcp-tool/symbol-context", body)
-                .await
-                .unwrap_or_else(|e| format!("Error: {e}"));
+        let text = forward_json_to_worker(&self.proxy, &repo, "/api/mcp-tool/symbol-context", body)
+            .await
+            .unwrap_or_else(|e| format!("Error: {e}"));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
@@ -303,15 +309,130 @@ impl ProxyMcpHandler {
             .unwrap_or_else(|e| format!("Error: {e}"));
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
+
+    /// Map a unified diff's added lines onto indexed symbols and report the
+    /// affected callers (read-only). Forwarded to the repo's worker: the git
+    /// fallback runs INSIDE the worker so it sees the same checkout the index
+    /// was built from.
+    #[tool(name = "changes-impact", annotations(read_only_hint = true))]
+    async fn changes_impact(
+        &self,
+        Parameters(args): Parameters<ProxyChangesImpactArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let repo = normalize_repo_path(args.workspace_full_path.trim());
+        if repo.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Error: workspace_full_path is required.".to_string(),
+            )]));
+        }
+        let body = json!({
+            "workspace_full_path": args.workspace_full_path,
+            "git_diff": args.git_diff,
+            "max_depth": args.max_depth,
+        });
+        let text = forward_json_to_worker(&self.proxy, &repo, "/api/mcp-tool/changes-impact", body)
+            .await
+            .unwrap_or_else(|e| format!("Error: {e}"));
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+}
+
+/// Args for the proxied global `changes-impact` tool. Mirrors `mcp::ChangesImpactArgs`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProxyChangesImpactArgs {
+    /// Full path to the workspace/repository. Selects which worker handles the call.
+    pub workspace_full_path: String,
+    /// Unified diff to analyze. When omitted, the worker runs `git diff HEAD`
+    /// inside the repo itself.
+    #[serde(default)]
+    pub git_diff: Option<String>,
+    /// How many caller levels to walk beyond each changed symbol. Defaults to
+    /// 2, capped at 5.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
 }
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for ProxyMcpHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            rmcp::model::Implementation::new("context-engine-rs", env!("CARGO_PKG_VERSION")),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
         )
+        .with_server_info(rmcp::model::Implementation::new(
+            "context-engine-rs",
+            env!("CARGO_PKG_VERSION"),
+        ))
     }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, ErrorData> {
+        prompt_get(&request.name)
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        prompt_list()
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        resource_list()
+    }
+
+    /// Served DIRECTLY by the router (no worker spawn): same sidecar-backed
+    /// listing as `list_repos`.
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let settings = match crate::config::ensure_dir_and_load(&self.home_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(ErrorData::internal_error(
+                    format!("could not read settings: {e}"),
+                    None,
+                ));
+            }
+        };
+        resource_read(&request.uri, &settings, &self.data_dir, None).await
+    }
+}
+
+// Same guided workflows and discovery resource as the monolith handlers —
+// shared via `crate::mcp` helpers.
+fn prompt_list() -> Result<ListPromptsResult, ErrorData> {
+    crate::mcp::proxy_prompt_list()
+}
+
+fn prompt_get(name: &str) -> Result<GetPromptResult, ErrorData> {
+    crate::mcp::proxy_prompt_get(name)
+}
+
+fn resource_list() -> Result<ListResourcesResult, ErrorData> {
+    crate::mcp::proxy_resource_list()
+}
+
+async fn resource_read(
+    uri: &str,
+    settings: &crate::config::Settings,
+    data_dir: &std::path::Path,
+    this_repo: Option<&str>,
+) -> Result<ReadResourceResult, ErrorData> {
+    crate::mcp::proxy_resource_read(uri, settings, data_dir, this_repo).await
 }
 
 /// Extract the `result` string the worker's `/api/mcp-tool` REST handlers wrap
@@ -328,17 +449,29 @@ pub fn unwrap_mcp_tool_result(raw: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Default settings enable only `codebase-retrieval`; the gate must hide
-    /// the other four repo-backed tools while `list_repos` stays visible.
+    /// Default settings enable `codebase-retrieval` + the three read-only
+    /// graph tools; the gate must hide `file-retrieval` while `list_repos`
+    /// stays visible.
     #[test]
     fn gate_hides_disabled_tools_but_never_list_repos() {
         let mut router = ProxyMcpHandler::tool_router();
-        apply_tool_gate(&mut router, &["codebase-retrieval".to_string()]);
+        apply_tool_gate(
+            &mut router,
+            &[
+                "codebase-retrieval",
+                "trace-path",
+                "symbol-context",
+                "impact",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        );
         assert!(!router.is_disabled("codebase-retrieval"));
         assert!(router.is_disabled("file-retrieval"));
-        assert!(router.is_disabled("trace-path"));
-        assert!(router.is_disabled("symbol-context"));
-        assert!(router.is_disabled("impact"));
+        assert!(!router.is_disabled("trace-path"));
+        assert!(!router.is_disabled("symbol-context"));
+        assert!(!router.is_disabled("impact"));
         // list_repos is not in the gate list, so it was never disabled.
         assert!(!router.is_disabled("list_repos"));
     }
@@ -355,6 +488,7 @@ mod tests {
                 "trace-path",
                 "symbol-context",
                 "impact",
+                "changes-impact",
             ]
             .iter()
             .map(|s| s.to_string())

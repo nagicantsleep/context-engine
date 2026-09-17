@@ -15,3 +15,6 @@ scripts/bin/harness.exe
 # ab_bench.sh legacy-build worktree cache + A/B output artifacts
 .ce-legacy-worktree/
 ab_benchmark*.json
+
+# Release binaries are built fresh by CI (npm publish workflow), never committed
+npm/*/bin/

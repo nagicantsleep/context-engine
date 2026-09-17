@@ -40,9 +40,13 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         repo: String,
 
-        /// Output file [default: ./graph.json]
+        /// Output file [default: ./graph.json, or ./graph.mmd for mermaid]
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
+
+        /// Output format: json (default) or mermaid (renderable diagram).
+        #[arg(long, value_enum, default_value_t = ExportFormat::Json, value_name = "FMT")]
+        format: ExportFormat,
 
         /// Node cap for the artifact (the report says when it is hit).
         #[arg(long, default_value_t = 20_000, value_name = "N")]
@@ -56,6 +60,33 @@ enum Command {
         #[arg(long, env = "CONTEXT_ENGINE_DATA_DIR", value_name = "PATH")]
         data_dir: Option<PathBuf>,
     },
+    /// Write per-area agent guidance files derived from the repo's call graph
+    /// (connected components — no LLM, no clustering). One markdown file per
+    /// area under `--out-dir`, listing the area's symbols and files so an
+    /// agent can navigate functional modules without exploring blind.
+    ExportAreas {
+        /// Repo path already indexed by the engine.
+        #[arg(long, value_name = "PATH")]
+        repo: String,
+
+        /// Output directory for `area-<n>.md` files [default: ./areas]
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
+
+        /// Skip areas larger than this many symbols (0 = keep everything).
+        #[arg(long, default_value_t = 0, value_name = "N")]
+        max_area_size: usize,
+
+        /// Data-directory base override (CLI > env > settings > builtin).
+        #[arg(long, env = "CONTEXT_ENGINE_DATA_DIR", value_name = "PATH")]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ExportFormat {
+    Json,
+    Mermaid,
 }
 
 #[derive(Parser, Debug)]
@@ -125,15 +156,36 @@ async fn main() {
         Some(Command::ExportGraph {
             repo,
             out,
+            format,
             max_nodes,
             max_edges,
             data_dir,
         }) => {
+            let fmt = match format {
+                ExportFormat::Json => runtime::export_graph::ExportFormat::Json,
+                ExportFormat::Mermaid => runtime::export_graph::ExportFormat::Mermaid,
+            };
             let code = runtime::export_graph::run(&runtime::export_graph::ExportGraphArgs {
                 repo,
                 out,
+                format: fmt,
                 max_nodes,
                 max_edges,
+                data_dir,
+            })
+            .await;
+            std::process::exit(code);
+        }
+        Some(Command::ExportAreas {
+            repo,
+            out_dir,
+            max_area_size,
+            data_dir,
+        }) => {
+            let code = runtime::export_areas::run(&runtime::export_areas::ExportAreasArgs {
+                repo,
+                out_dir,
+                max_area_size,
                 data_dir,
             })
             .await;

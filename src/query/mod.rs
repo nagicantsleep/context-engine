@@ -1,3 +1,4 @@
+pub mod changed_impact;
 pub mod content_fence;
 pub mod cross_repo;
 pub mod engine;

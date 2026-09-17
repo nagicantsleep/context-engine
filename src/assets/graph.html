@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>context-engine · graph view</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0d10; color: #e6e8eb; font: 14px/1.45 ui-sans-serif, system-ui, sans-serif; }
+  header { padding: 10px 16px; border-bottom: 1px solid #1c2026; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header select, header input, header button { background: #14171c; color: inherit; border: 1px solid #2a2f37; border-radius: 6px; padding: 5px 8px; font: inherit; }
+  #wrap { position: relative; }
+  svg { display: block; width: 100vw; height: calc(100vh - 57px); }
+  #info { position: absolute; right: 12px; top: 12px; max-width: 380px; background: #14171cee; border: 1px solid #2a2f37; border-radius: 8px; padding: 10px 12px; font-size: 12.5px; display: none; }
+  #info code { color: #9ecbff; word-break: break-all; }
+  #stats { color: #8b939e; font-size: 12.5px; }
+  .legend { color: #8b939e; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Call graph</h1>
+  <select id="repo"></select>
+  <input id="q" type="search" placeholder="filter by name or file…" size="28" />
+  <span id="stats"></span>
+  <span class="legend">drag = pin · double-click = unpin · scroll = zoom</span>
+</header>
+<div id="wrap">
+  <svg id="g" viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid meet"></svg>
+  <div id="info"></div>
+</div>
+<script>
+// Self-contained force-directed renderer for the bounded /api/repos/<id>/graph
+// payload ({nodes, edges, truncated}). No dependencies, no build step: the
+// whole UI ships inside the binary.
+const svg = document.getElementById('g'), repoSel = document.getElementById('repo'),
+      q = document.getElementById('q'), stats = document.getElementById('stats'),
+      info = document.getElementById('info');
+let nodes = [], edges = [], byId = new Map(), sim = null, show = null;
+
+function esc(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadRepos(){
+  const cfg = await (await fetch('/api/config')).json();
+  const repos = cfg.repos || [];
+  repoSel.innerHTML = repos.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join('') || '<option value="">(no repos)</option>';
+  if (repos.length) load(repos[0]);
+}
+
+function b64(s){ return btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+
+async function load(repo){
+  const res = await fetch(`/api/repos/${b64(repo)}/graph`);
+  const g = await res.json();
+  nodes = (g.nodes || []).map((n,i) => ({ ...n, x: 600 + 260*Math.cos(i*2.4), y: 400 + 260*Math.sin(i*2.4), vx:0, vy:0, pin:false }));
+  edges = g.edges || [];
+  byId = new Map(nodes.map(n => [n.id, n]));
+  info.style.display = 'none';
+  stats.textContent = `${nodes.length} nodes · ${edges.length} edges${g.truncated ? ' (truncated)' : ''}`;
+  applyFilter();
+}
+
+function applyFilter(){
+  const t = q.value.trim().toLowerCase();
+  show = t ? nodes.filter(n => n.name.toLowerCase().includes(t) || n.file.toLowerCase().includes(t)) : nodes;
+  startSim();
+}
+
+function startSim(){
+  if (sim) cancelAnimationFrame(sim);
+  let ticks = 0;
+  const step = () => {
+    // Bounded force pass: repulsion is grid-free O(n²) but n is hard-capped
+    // upstream (GRAPH_NODE_LIMIT), so this stays cheap.
+    for (let i = 0; i < show.length; i++) {
+      const a = show[i];
+      for (let j = i+1; j < show.length; j++) {
+        const b = show[j];
+        let dx = a.x-b.x, dy = a.y-b.y, d2 = dx*dx+dy*dy || 1;
+        if (d2 < 90000) { const f = 1400/d2, d = Math.sqrt(d2); dx/=d; dy/=d; a.vx+=dx*f; a.vy+=dy*f; b.vx-=dx*f; b.vy-=dy*f; }
+      }
+    }
+    for (const e of edges) {
+      const a = byId.get(e.source), b = byId.get(e.target);
+      if (!a || !b) continue;
+      let dx = b.x-a.x, dy = b.y-a.y, d = Math.hypot(dx,dy) || 1;
+      const f = (d - 90) * 0.006; dx/=d; dy/=d;
+      a.vx += dx*f*d*0.01; a.vy += dy*f*d*0.01; b.vx -= dx*f*d*0.01; b.vy -= dy*f*d*0.01;
+    }
+    for (const n of show) {
+      if (n.pin) { n.vx = n.vy = 0; continue; }
+      n.vx += (600-n.x)*0.0015; n.vy += (400-n.y)*0.0015;
+      n.vx *= 0.82; n.vy *= 0.82; n.x += n.vx; n.y += n.vy;
+    }
+    draw();
+    if (++ticks < 300) sim = requestAnimationFrame(step);
+  };
+  step();
+}
+
+function draw(){
+  const E = edges.filter(e => byId.get(e.source) && byId.get(e.target));
+  svg.innerHTML =
+    E.map(e => { const a=byId.get(e.source), b=byId.get(e.target);
+      return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="#2a3340" stroke-width="0.7"/>`; }).join('') +
+    show.map(n => `<circle cx="${n.x}" cy="${n.y}" r="${n.kind==='class'?6:4}" fill="${n.kind==='class'?'#c792ea':n.kind==='method'?'#82aaff':'#7fd6a4'}"><title>${esc(n.name)}</title></circle>`).join('');
+}
+
+function nearest(cx, cy){
+  const pt = new DOMPoint(cx, cy).matrixTransform(svg.getScreenCTM().inverse());
+  let best=null, bd=1e9;
+  for (const x of show){ const d=Math.hypot(x.x-pt.x, x.y-pt.y); if(d<bd){bd=d;best=x;} }
+  return (best && bd < 30) ? best : null;
+}
+
+svg.addEventListener('pointerdown', ev => {
+  if (ev.target.tagName !== 'circle') return;
+  const n = nearest(ev.clientX, ev.clientY);
+  if (!n) return;
+  ev.target.setPointerCapture(ev.pointerId);
+  const move = e2 => {
+    const pt = new DOMPoint(e2.clientX, e2.clientY).matrixTransform(svg.getScreenCTM().inverse());
+    n.x = pt.x; n.y = pt.y; n.pin = true; draw();
+  };
+  const up = () => { svg.removeEventListener('pointermove', move); svg.removeEventListener('pointerup', up); };
+  svg.addEventListener('pointermove', move); svg.addEventListener('pointerup', up);
+});
+svg.addEventListener('dblclick', ev => {
+  const n = nearest(ev.clientX, ev.clientY);
+  if (n) n.pin = false;
+});
+svg.addEventListener('click', ev => {
+  const best = nearest(ev.clientX, ev.clientY);
+  if (!best) { info.style.display='none'; return; }
+  const ins = edges.filter(e => e.source===best.id), outs = edges.filter(e => e.target===best.id);
+  info.innerHTML = `<b>${esc(best.name)}</b> <i>(${esc(best.kind||'?')})</i><br/>
+    <code>${esc(best.file)}:${best.line_start}-${best.line_end}</code><br/>
+    callers: ${ins.length} · callees: ${outs.length}<br/>
+    ${ins.slice(0,8).map(e=>`↤ <code>${esc(byId.get(e.source)?.name||e.source)}</code>`).join('<br/>')}
+    ${outs.slice(0,8).map(e=>`<br/>↦ <code>${esc(byId.get(e.target)?.name||e.target)}</code>`).join('')}`;
+  info.style.display = 'block';
+});
+
+repoSel.addEventListener('change', () => repoSel.value && load(repoSel.value));
+q.addEventListener('input', applyFilter);
+loadRepos();
+</script>
+</body>
+</html>

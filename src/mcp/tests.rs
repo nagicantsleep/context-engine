@@ -760,12 +760,13 @@ fn list_repos_reports_sidecar_state_and_marks_this_repo() {
     let dir = tempfile::TempDir::new().unwrap();
     let repo_a = "/repo/alpha";
     let repo_b = "/repo/beta";
+    let fresh_ts = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
     crate::router::sidecar::write_sidecar(
         dir.path(),
         repo_a,
         &crate::router::sidecar::RepoSidecar {
             file_count: 1234,
-            last_indexed_at: Some("2026-09-04T12:00:00Z".to_string()),
+            last_indexed_at: Some(fresh_ts),
             state: "indexed".to_string(),
             embedding_model: "voyage-code-3".to_string(),
             embedding_dim: 1024,
@@ -785,7 +786,10 @@ fn list_repos_reports_sidecar_state_and_marks_this_repo() {
     assert!(out.contains(repo_a) && out.contains(repo_b), "{out}");
     // Repo A: durable sidecar state surfaced.
     assert!(out.contains("indexed — 1234 file(s)"), "{out}");
-    assert!(out.contains("last indexed 2026-09-04T12:00:00Z"), "{out}");
+    assert!(
+        out.contains("last indexed 20"),
+        "RFC3339 stamp surfaced: {out}"
+    );
     assert!(out.contains("voyage-code-3"), "{out}");
     // Repo B: no sidecar → cold placeholder, not an error.
     let b_section = out.split("/repo/beta").nth(1).unwrap();
@@ -804,6 +808,56 @@ fn list_repos_reports_sidecar_state_and_marks_this_repo() {
     assert!(out.contains(&store::sanitize_repo_name(repo_a)), "{out}");
     assert!(out.contains("workspace_full_path"), "{out}");
     assert!(out.contains("cross-repo"), "{out}");
+    // 2026-09-04 stamp is well inside the default stale window → no marker.
+    assert!(
+        !out.contains("STALE"),
+        "fresh sidecar must not be marked stale: {out}"
+    );
+}
+
+#[test]
+fn list_repos_marks_stale_sidecar_with_threshold_note() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo_old = "/repo/old-index";
+    let repo_fresh = "/repo/fresh-index";
+    let old_ts = (chrono::Utc::now() - chrono::Duration::days(45)).to_rfc3339();
+    let fresh_ts = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+    for (repo, ts) in [(repo_old, &old_ts), (repo_fresh, &fresh_ts)] {
+        crate::router::sidecar::write_sidecar(
+            dir.path(),
+            repo,
+            &crate::router::sidecar::RepoSidecar {
+                file_count: 10,
+                last_indexed_at: Some(ts.to_string()),
+                state: "indexed".to_string(),
+                embedding_model: "voyage-code-3".to_string(),
+                embedding_dim: 1024,
+                schema: crate::router::sidecar::SIDECAR_SCHEMA,
+            },
+        )
+        .unwrap();
+    }
+
+    let settings = Settings {
+        repos: vec![repo_old.to_string(), repo_fresh.to_string()],
+        ..Settings::default()
+    }; // default mcp_stale_after_days
+    let out = run_list_repos(&settings, dir.path(), None);
+
+    let old_section = out.split(repo_old).nth(1).unwrap();
+    let fresh_section = out.split(repo_fresh).nth(1).unwrap();
+    assert!(
+        old_section.contains("STALE"),
+        "45-day-old index must be marked stale: {old_section}"
+    );
+    assert!(
+        old_section.contains("re-indexes"),
+        "stale note must say how to refresh: {old_section}"
+    );
+    assert!(
+        !fresh_section.contains("STALE"),
+        "1-day-old index must not be marked stale: {fresh_section}"
+    );
 }
 
 #[test]
@@ -1017,12 +1071,145 @@ async fn impact_reports_levels_and_most_affected_files() {
     assert!(out.contains("most affected files:"), "{out}");
     assert!(out.contains("×1"), "{out}");
 }
+#[tokio::test]
+async fn changes_impact_maps_diff_lines_to_changed_symbols_and_callers() {
+    let home = tempfile::TempDir::new().unwrap();
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let repo = home
+        .path()
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let db = crate::store::open_db(data_dir.path(), &repo, 0)
+        .await
+        .unwrap();
+    crate::store::ops::set_meta(&db, crate::store::DB_SCHEMA_VERSION_KEY, "2")
+        .await
+        .unwrap();
+
+    // core at lib.rs lines 10-20; caller `a` in a.rs calls it.
+    let target = format!("{repo}/lib.rs::core");
+    let a = format!("{repo}/a.rs::a");
+    for (fqn, name, file, line_start, line_end) in [
+        (target.clone(), "core", format!("{repo}/lib.rs"), 10, 20),
+        (a.clone(), "a", format!("{repo}/a.rs"), 1, 5),
+    ] {
+        db.query(format!(
+            "CREATE symbol:`⟨{fqn}⟩` SET name = '{name}', file = '{file}', \
+             kind = 'function', line_start = {line_start}, line_end = {line_end};"
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    }
+    db.query(
+        "INSERT INTO calls { in_name: $caller, out_name: $fqn, in_file: $cf, \
+         out_file: $tf, line: 2, confidence: NONE }",
+    )
+    .bind(("caller", a.clone()))
+    .bind(("fqn", target.clone()))
+    .bind(("cf", format!("{repo}/a.rs")))
+    .bind(("tf", format!("{repo}/lib.rs")))
+    .await
+    .unwrap()
+    .check()
+    .unwrap();
+
+    let repo_dbs: std::sync::Arc<RwLock<HashMap<String, Surreal<Db>>>> =
+        std::sync::Arc::new(RwLock::new(HashMap::from([(repo.clone(), db)])));
+    let settings = Settings::default();
+
+    // A diff whose added line (new-file line 12) lands inside core's span.
+    let diff = format!(
+        "--- a/lib.rs\n+++ b/lib.rs\n@@ -10,7 +10,8 @@ fn core() {{\n existing\n+new hot line\n more"
+    );
+    let out = run_changes_impact(
+        &repo_dbs,
+        data_dir.path(),
+        &settings,
+        &repo,
+        Some(&diff),
+        None,
+    )
+    .await;
+
+    assert!(out.contains(&target), "changed symbol listed: {out}");
+    assert!(out.contains("lib.rs:10-20"), "span surfaced: {out}");
+    assert!(out.contains(&a), "direct caller listed: {out}");
+    assert!(
+        out.contains("1 changed symbol(s), 1 affected caller(s)"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn changes_impact_reports_diffs_that_touch_no_symbol() {
+    let home = tempfile::TempDir::new().unwrap();
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let repo = home
+        .path()
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let db = crate::store::open_db(data_dir.path(), &repo, 0)
+        .await
+        .unwrap();
+    crate::store::ops::set_meta(&db, crate::store::DB_SCHEMA_VERSION_KEY, "2")
+        .await
+        .unwrap();
+    let repo_dbs: std::sync::Arc<RwLock<HashMap<String, Surreal<Db>>>> =
+        std::sync::Arc::new(RwLock::new(HashMap::from([(repo.clone(), db)])));
+    let settings = Settings::default();
+
+    // Added lines in a file with NO indexed symbols.
+    let diff = "--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,3 @@\n docs line\n+new docs line";
+    let out = run_changes_impact(
+        &repo_dbs,
+        data_dir.path(),
+        &settings,
+        &repo,
+        Some(diff),
+        None,
+    )
+    .await;
+    assert!(
+        out.contains("none overlaps an indexed symbol span"),
+        "{out}"
+    );
+
+    // A deletions-only diff is reported honestly, never mapped.
+    let del = "--- a/x.rs\n+++ b/x.rs\n@@ -3,3 +3,2 @@\n-dead line\n-dead line 2";
+    let out = run_changes_impact(
+        &repo_dbs,
+        data_dir.path(),
+        &settings,
+        &repo,
+        Some(del),
+        None,
+    )
+    .await;
+    assert!(out.contains("adds no lines"), "{out}");
+
+    // An explicitly empty git_diff is an error, not a silent no-op.
+    let out = run_changes_impact(
+        &repo_dbs,
+        data_dir.path(),
+        &settings,
+        &repo,
+        Some("   "),
+        None,
+    )
+    .await;
+    assert!(out.starts_with("Error:"), "{out}");
+}
 
 #[tokio::test]
 async fn impact_of_unused_symbol_explains_why() {
     let data_dir = tempfile::TempDir::new().unwrap();
     let repo_dbs: std::sync::Arc<RwLock<HashMap<String, Surreal<Db>>>> =
         std::sync::Arc::new(RwLock::new(HashMap::new()));
+
     let settings = Settings::default();
     let out = run_impact(
         &repo_dbs,

@@ -47,10 +47,12 @@ context-engine --port 6699
 | LLM 重排序 | 使用 LLM（OpenAI / Google）对候选片段重新排序；可选，可禁用 |
 | 内嵌 SurrealDB | 存储片段、符号和边；每个仓库一个数据存储 |
 | HTTP API + Web 界面 | 配置管理、索引浏览器和查询测试控制台 |
-| MCP 服务器 | `codebase-retrieval`、`file-retrieval`、只读图谱工具 `trace-path` / `symbol-context` / `impact`，以及始终可用的发现工具 `list_repos` |
+| MCP 服务器 | `codebase-retrieval`、`file-retrieval`（opt-in）、只读图谱工具 `trace-path` / `symbol-context` / `impact` / `changes-impact`、引导式 prompts，以及始终可用的发现工具 `list_repos` |
 | 密钥脱敏 | 在内容进入重排 LLM 或任何工具输出之前，先从 chunk 内容中脱敏 API 密钥和凭据 |
 | 混合检索 | 词法回退通过加权 RRF 与向量检索融合（默认开启；`CONTEXT_ENGINE_LEXICAL=0` 关闭） |
-| 可移植图谱导出 | `export-graph` 将节点、边及每条边的置信度写入带版本的 JSON 产物 |
+| 可移植图谱导出 | `export-graph` 将节点、边及每条边的置信度写入带版本的 JSON 产物（或通过 `--format mermaid` 输出 Mermaid 图） |
+| 图谱视图 | 自包含的 `/graph.html` 页面将有界冷图谱渲染为交互式 SVG —— 无外部 JS 依赖 |
+| 区域引导 | `export-areas` 从调用图推导功能区域（连通分量，无 LLM），并为每个区域写入 agent 引导文件 |
 | SSE 进度流 | 将实时索引进度事件流式传输到界面 |
 | 大型仓库扩展 | 内存有界且无 O(n²) 路径 —— 为 Linux/Chromium 规模的代码库而构建 |
 
@@ -58,10 +60,13 @@ context-engine --port 6699
 
 全局 `/mcp`（每次调用都传入绝对路径 `workspace_full_path`）与每个仓库的
 `/mcp-repo/<name>`（workspace 已预绑定）两个端点暴露相同的工具集。全新配置默认
-只启用 `codebase-retrieval`；`file-retrieval`、`trace-path`、`symbol-context`
-和 `impact` 需要在设置（或 Web 界面）中通过 `enabled_mcp_tools` 显式开启。
-`list_repos` 始终暴露，因为发现能力不应依赖 opt-in。在全局端点上，与仓库相关
-的工具会被转发到该仓库的 worker，输出与 per-repo 端点完全一致：
+启用 `codebase-retrieval` 与三个只读图谱工具（`trace-path`、`symbol-context`、
+`impact`、`changes-impact`）；仅 `file-retrieval` 需要在设置（或 Web 界面）中
+通过 `enabled_mcp_tools` 显式开启。`list_repos` 始终暴露，因为发现能力不应依赖
+opt-in。两个端点还提供两个引导式 MCP prompt（`detect-impact`、`generate-map`）
+与只读资源 `ce://repos`（即 `list_repos` 输出的同一列表——读取不会 spawn worker）。
+在全局端点上，与仓库相关的工具会被转发到该仓库的 worker，输出与 per-repo 端点
+完全一致：
 
 | 工具 | 关键参数 | 用途 |
 |------|---------------|---------|
@@ -71,6 +76,7 @@ context-engine --port 6699
 | `trace-path` | `workspace_full_path`、`from_symbol`、`to_symbol`、可选 `direction`（`callees`/`callers`）、`max_depth`（默认 5，上限 10） | 两个符号之间的调用路径；提取边优先于推断边 |
 | `symbol-context` | `workspace_full_path`、`symbol` | 单个符号的带行号定义源码及调用者/被调用者摘要 |
 | `impact` | `workspace_full_path`、`symbol`、可选 `max_depth`（默认 3，上限 8） | 按调用者距离分层的反向调用图遍历，并给出受影响最多文件的摘要 |
+| `changes-impact` | `workspace_full_path`、可选 `git_diff`、可选 `max_depth`（默认 2，上限 5） | 将 unified diff 的新增行映射到已索引符号并列出受影响调用者；省略 `git_diff` 时引擎在仓库内运行 `git diff HEAD` |
 
 符号接受完整 FQN（`/abs/file.rs::mod::name`）、`file.rs::name`、`::name` 或裸
 名称；歧义引用会返回候选列表而不是猜测。触及深度或预算上限而截断时一定会明
@@ -107,7 +113,10 @@ userinfo 的 DSN URL 保留可信前缀并丢弃凭据；形似密钥的赋值�
 context-engine setup --repo /abs/path/to/repo [--tool claude,codex,opencode|all] [--port 6699] [--bind 127.0.0.1] [--url https://proxy]
 
 # 将调用图导出为可移植的 JSON 产物（context-engine-graph/v1）
-context-engine export-graph --repo /abs/path/to/repo [--out graph.json] [--max-nodes N] [--max-edges N]
+context-engine export-graph --repo /abs/path/to/repo [--format json|mermaid] [--out graph.json] [--max-nodes N] [--max-edges N]
+
+# 从调用图生成按 area 的 agent 引导文件（连通分量——确定性、无 LLM、无聚类）
+context-engine export-areas --repo /abs/path/to/repo [--out-dir areas] [--max-area-size N]
 ```
 
 ### 嵌入提供商

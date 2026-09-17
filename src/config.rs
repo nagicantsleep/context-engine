@@ -9,7 +9,7 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 
 /// Bump this when a new migration is appended to MIGRATIONS.
-pub const CURRENT_VERSION: u32 = 15;
+pub const CURRENT_VERSION: u32 = 16;
 
 /// Migration function type: transforms a JSON Value from version N to version N+1.
 pub type MigrationFn = fn(Value) -> Result<Value, ConfigError>;
@@ -31,6 +31,7 @@ pub const MIGRATIONS: &[MigrationFn] = &[
     migrate_v12_to_v13,
     migrate_v13_to_v14,
     migrate_v14_to_v15,
+    migrate_v15_to_v16,
 ];
 
 /// v1→v2: introduce `data_dir` (Option<PathBuf>). The body is a no-op stamp —
@@ -221,6 +222,28 @@ fn migrate_v14_to_v15(mut value: Value) -> Result<Value, ConfigError> {
         && let Some(Value::Object(embedding)) = obj.get_mut("embedding")
     {
         embedding.entry("ollama_base_url").or_insert(Value::Null);
+    }
+    Ok(value)
+}
+
+/// v15→v16: default-enable the read-only graph tools (`trace-path`,
+/// `symbol-context`, `impact`) so agents see the graph surface without a
+/// manual opt-in. Mirrors the v3→v4 direction (inject on upgrade): any
+/// NON-EMPTY `enabled_mcp_tools` gains the missing graph tools; an explicitly
+/// EMPTY list is preserved (a user who disabled everything stays disabled),
+/// and a user who deliberately removed them after upgrading is never
+/// re-subscribed (migrations do not re-run at CURRENT_VERSION).
+fn migrate_v15_to_v16(mut value: Value) -> Result<Value, ConfigError> {
+    const GRAPH_DEFAULTS: [&str; 4] = ["trace-path", "symbol-context", "impact", "changes-impact"];
+    if let Value::Object(ref mut obj) = value
+        && let Some(Value::Array(tools)) = obj.get_mut("enabled_mcp_tools")
+        && !tools.is_empty()
+    {
+        for tool in GRAPH_DEFAULTS {
+            if !tools.iter().any(|t| t.as_str() == Some(tool)) {
+                tools.push(Value::from(tool));
+            }
+        }
     }
     Ok(value)
 }
@@ -476,9 +499,17 @@ fn default_mcp_stale_after_days() -> u64 {
 }
 
 fn default_enabled_mcp_tools() -> Vec<String> {
-    // Only `codebase-retrieval` is on by default. `file-retrieval` is an
+    // `codebase-retrieval` plus the four READ-ONLY graph tools are on by
+    // default (2026-09-16): the graph surface is safe to expose and new agents
+    // should see it without a manual opt-in. `file-retrieval` remains an
     // advanced, opt-in tool — new installs must enable it explicitly in the UI.
-    vec!["codebase-retrieval".to_string()]
+    vec![
+        "codebase-retrieval".to_string(),
+        "trace-path".to_string(),
+        "symbol-context".to_string(),
+        "impact".to_string(),
+        "changes-impact".to_string(),
+    ]
 }
 
 /// A plan/key the user has bought (or claimed as a free trial) through the buy
@@ -1863,8 +1894,14 @@ mod tests {
         assert_eq!(loaded.version, CURRENT_VERSION);
         assert_eq!(
             loaded.enabled_mcp_tools,
-            vec!["codebase-retrieval".to_string()],
-            "file-retrieval must be removed from enabled tools on upgrade"
+            vec![
+                "codebase-retrieval".to_string(),
+                "trace-path".to_string(),
+                "symbol-context".to_string(),
+                "impact".to_string(),
+                "changes-impact".to_string()
+            ],
+            "file-retrieval must be removed on upgrade and graph tools added by v15→v16"
         );
 
         let raw = fs::read_to_string(&path).expect("re-read");
@@ -1900,12 +1937,22 @@ mod tests {
         assert_eq!(tools, vec!["codebase-retrieval".to_string()]);
     }
 
-    /// New installs default to `codebase-retrieval` only; `file-retrieval` is
-    /// opt-in and must NOT appear in the default tool list.
+    /// New installs default to `codebase-retrieval` + the four read-only
+    /// graph tools; `file-retrieval` is opt-in and must NOT appear in the
+    /// default tool list.
     #[test]
     fn test_default_enabled_mcp_tools_excludes_file_retrieval() {
         let tools = default_enabled_mcp_tools();
-        assert_eq!(tools, vec!["codebase-retrieval".to_string()]);
+        assert_eq!(
+            tools,
+            vec![
+                "codebase-retrieval".to_string(),
+                "trace-path".to_string(),
+                "symbol-context".to_string(),
+                "impact".to_string(),
+                "changes-impact".to_string()
+            ]
+        );
         assert!(
             !tools.iter().any(|t| t == "file-retrieval"),
             "file-retrieval must not be enabled by default"
@@ -1972,6 +2019,12 @@ mod tests {
                     .any(|t| t == "codebase-retrieval"),
                 "v{from} config must retain codebase-retrieval"
             );
+            for graph_tool in ["trace-path", "symbol-context", "impact", "changes-impact"] {
+                assert!(
+                    loaded.enabled_mcp_tools.iter().any(|t| t == graph_tool),
+                    "v{from} config must gain {graph_tool} via v15→v16"
+                );
+            }
         }
     }
 
@@ -2024,8 +2077,8 @@ mod tests {
         let loaded = ensure_dir_and_load(home.path()).expect("load v12 missing tools");
         assert_eq!(
             loaded.enabled_mcp_tools,
-            vec!["codebase-retrieval".to_string()],
-            "missing enabled_mcp_tools must default to codebase-retrieval only"
+            default_enabled_mcp_tools(),
+            "missing enabled_mcp_tools must default to codebase-retrieval + graph tools"
         );
     }
 

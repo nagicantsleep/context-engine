@@ -105,7 +105,11 @@ async fn query_in_repo_a_expands_into_indexed_repo_b_via_router() {
         if !status.is_success() {
             return Err(format!("index poke for repo B failed: {status}"));
         }
-        if !wait_until(60, || async { read_symbol_sidecar(data_dir, &repo_b).is_some() }).await {
+        if !wait_until(60, || async {
+            read_symbol_sidecar(data_dir, &repo_b).is_some()
+        })
+        .await
+        {
             return Err(
                 "repo B must publish a symbol sidecar after a successful index".to_string(),
             );
@@ -116,7 +120,11 @@ async fn query_in_repo_a_expands_into_indexed_repo_b_via_router() {
         if !status.is_success() {
             return Err(format!("index poke for repo A failed: {status}"));
         }
-        if !wait_until(60, || async { read_symbol_sidecar(data_dir, &repo_a).is_some() }).await {
+        if !wait_until(60, || async {
+            read_symbol_sidecar(data_dir, &repo_a).is_some()
+        })
+        .await
+        {
             return Err("repo A must finish indexing (and publish its own sidecar)".to_string());
         }
         // The readiness gate may answer VectorOnly while post-index graph
@@ -145,7 +153,11 @@ async fn query_in_repo_a_expands_into_indexed_repo_b_via_router() {
                 .as_array()
                 .unwrap_or(&vec![])
                 .iter()
-                .find(|r| r["file"].as_str().is_some_and(|f| f.starts_with(repo_b.as_str())))
+                .find(|r| {
+                    r["file"]
+                        .as_str()
+                        .is_some_and(|f| f.starts_with(repo_b.as_str()))
+                })
                 .cloned();
             if let Some(hit) = hit {
                 break Ok(hit);
@@ -177,4 +189,4 @@ async fn query_in_repo_a_expands_into_indexed_repo_b_via_router() {
     // Deterministic teardown on BOTH success and failure paths.
     proxy.registry.kill_all().await;
     outcome.expect("cross-repo e2e flow");
- }
+}

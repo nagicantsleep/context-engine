@@ -32,6 +32,129 @@ use surrealdb::engine::local::Db;
 /// Version tag written into every export artifact.
 pub const GRAPH_EXPORT_FORMAT: &str = "context-engine-graph/v1";
 
+/// One functional area derived from the call graph: the symbols in one
+/// connected component of the UNDIRECTED call graph (a file-only cheaper
+/// stand-in for Leiden clustering, in line with decision 0001: no in-core
+/// clustering — this is a linear-time union-find over an already-built export,
+/// not a graph algorithm in the query path).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GraphArea {
+    pub id: usize,
+    pub symbols: Vec<String>,
+    /// Distinct files contributing symbols, most-symbols-first.
+    pub files: Vec<String>,
+    /// Internal symbol count.
+    pub size: usize,
+}
+
+/// Split an export's nodes into connected components over its edges (undirected
+/// union-find, deterministic ordering). Singletons (no edges — impossible for a
+/// contract-valid export, which only exports edge-participating nodes, but kept
+/// for robustness) become their own area.
+pub fn to_areas(export: &GraphExport) -> Vec<GraphArea> {
+    let index: HashMap<&str, usize> = export
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+    let mut parent: Vec<usize> = (0..export.nodes.len()).collect();
+    fn find(parent: &mut Vec<usize>, x: usize) -> usize {
+        let mut x = x;
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for e in &export.edges {
+        let (Some(a), Some(b)) = (index.get(e.source.as_str()), index.get(e.target.as_str()))
+        else {
+            continue;
+        };
+        let (ra, rb) = (find(&mut parent, *a), find(&mut parent, *b));
+        if ra != rb {
+            // Attach the larger root's label to keep determinism simple.
+            if rb < ra {
+                parent[ra] = rb;
+            } else {
+                parent[rb] = ra;
+            }
+        }
+    }
+
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..export.nodes.len() {
+        members.entry(find(&mut parent, i)).or_default().push(i);
+    }
+    let mut roots: Vec<(usize, Vec<usize>)> = members.into_iter().collect();
+    roots.sort(); // deterministic by root id
+
+    let mut areas: Vec<GraphArea> = Vec::new();
+    for (id, (_, member_idx)) in roots.iter().enumerate() {
+        let mut symbols: Vec<String> = member_idx
+            .iter()
+            .map(|&i| export.nodes[i].id.clone())
+            .collect();
+        symbols.sort();
+        let mut file_counts: HashMap<&str, usize> = HashMap::new();
+        for &i in member_idx {
+            *file_counts
+                .entry(export.nodes[i].file.as_str())
+                .or_default() += 1;
+        }
+        let mut files: Vec<(usize, String)> = file_counts
+            .into_iter()
+            .map(|(f, c)| (c, f.to_string()))
+            .collect();
+        files.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        areas.push(GraphArea {
+            id,
+            size: member_idx.len(),
+            files: files.into_iter().map(|(_, f)| f).collect(),
+            symbols,
+        });
+    }
+    areas
+}
+
+/// Render a built export as a Mermaid `flowchart LR` diagram.
+///
+/// Node ids in the diagram are sequential (`n0`, `n1`, …) because FQNs carry
+/// characters Mermaid treats as syntax (`/`, `:`, quotes); the readable
+/// identity lives in the node label (`name · file:line`). Inferred edges are
+/// dotted (`-.->`) so provenance survives the rendering, mirroring the
+/// `~inferred` MCP tags. Deterministic: the same export renders identically.
+pub fn to_mermaid(export: &GraphExport) -> String {
+    let mut out = String::from("flowchart LR\n");
+    let mut ids: HashMap<&str, String> = HashMap::with_capacity(export.nodes.len());
+    for (i, node) in export.nodes.iter().enumerate() {
+        let diagram_id = format!("n{i}");
+        let label = match (node.line_start, node.line_end) {
+            (0, 0) => node.name.clone(),
+            (s, e) if s == e => format!("{} · {}:{s}", node.name, node.file),
+            (s, e) => format!("{} · {}:{s}-{e}", node.name, node.file),
+        };
+        ids.insert(node.id.as_str(), diagram_id.clone());
+        out.push_str(&format!(
+            "    {diagram_id}[\"{}\"]\n",
+            label.replace('"', "'")
+        ));
+    }
+    for edge in &export.edges {
+        let (Some(src), Some(dst)) = (ids.get(edge.source.as_str()), ids.get(edge.target.as_str()))
+        else {
+            continue; // cannot happen for a contract-valid export; skip, don't crash
+        };
+        if edge.inferred {
+            out.push_str(&format!("    {src} -.->|inferred| {dst}\n"));
+        } else {
+            out.push_str(&format!("    {src} --> {dst}\n"));
+        }
+    }
+    out
+}
+
 /// One exported node (a symbol participating in ≥1 retained edge).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ExportNode {
@@ -255,6 +378,122 @@ mod tests {
         .unwrap()
         .check()
         .unwrap();
+    }
+
+    #[test]
+    fn mermaid_render_is_deterministic_and_marks_inferred_edges() {
+        let export = GraphExport {
+            format: GRAPH_EXPORT_FORMAT,
+            repo: "/repo".to_string(),
+            schema_version: 2,
+            exported_at: "2026-09-16T00:00:00Z".to_string(),
+            node_count: 2,
+            edge_count: 2,
+            truncated: false,
+            dangling_edges_dropped: 0,
+            nodes: vec![
+                ExportNode {
+                    id: "/repo/a.rs::a".to_string(),
+                    name: "a".to_string(),
+                    kind: Some("function".to_string()),
+                    file: "/repo/a.rs".to_string(),
+                    line_start: 1,
+                    line_end: 3,
+                },
+                ExportNode {
+                    id: "/repo/b.rs::b".to_string(),
+                    name: "b".to_string(),
+                    kind: None,
+                    file: "/repo/b.rs".to_string(),
+                    line_start: 7,
+                    line_end: 7,
+                },
+            ],
+            edges: vec![
+                ExportEdge {
+                    source: "/repo/a.rs::a".to_string(),
+                    target: "/repo/b.rs::b".to_string(),
+                    confidence: None,
+                    inferred: false,
+                },
+                ExportEdge {
+                    source: "/repo/b.rs::b".to_string(),
+                    target: "/repo/a.rs::a".to_string(),
+                    confidence: Some(0.6),
+                    inferred: true,
+                },
+            ],
+        };
+        let m1 = to_mermaid(&export);
+        let m2 = to_mermaid(&export);
+        assert_eq!(m1, m2, "deterministic");
+        assert!(m1.starts_with("flowchart LR\n"), "{m1}");
+        assert!(m1.contains("n0[\"a · /repo/a.rs:1-3\"]"), "{m1}");
+        assert!(m1.contains("n1[\"b · /repo/b.rs:7\"]"), "{m1}");
+        assert!(m1.contains("n0 --> n1"), "extracted solid: {m1}");
+        assert!(m1.contains("n1 -.->|inferred| n0"), "inferred dotted: {m1}");
+    }
+
+    #[test]
+    fn areas_group_connected_components_and_rank_files() {
+        let mk = |id: &str, file: &str| ExportNode {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: None,
+            file: file.to_string(),
+            line_start: 1,
+            line_end: 1,
+        };
+        // Component 1: a↔b; Component 2: c↔d↔c.
+        let export = GraphExport {
+            format: GRAPH_EXPORT_FORMAT,
+            repo: "/repo".to_string(),
+            schema_version: 2,
+            exported_at: "t".into(),
+            node_count: 4,
+            edge_count: 3,
+            truncated: false,
+            dangling_edges_dropped: 0,
+            nodes: vec![
+                mk("a", "/r/a.rs"),
+                mk("b", "/r/b.rs"),
+                mk("c", "/r/c.rs"),
+                mk("d", "/r/d.rs"),
+            ],
+            edges: vec![
+                ExportEdge {
+                    source: "a".into(),
+                    target: "b".into(),
+                    confidence: None,
+                    inferred: false,
+                },
+                ExportEdge {
+                    source: "c".into(),
+                    target: "d".into(),
+                    confidence: None,
+                    inferred: false,
+                },
+                ExportEdge {
+                    source: "d".into(),
+                    target: "c".into(),
+                    confidence: Some(0.5),
+                    inferred: true,
+                },
+            ],
+        };
+        let areas = to_areas(&export);
+        assert_eq!(areas.len(), 2, "{areas:?}");
+        let total: usize = areas.iter().map(|a| a.size).sum();
+        assert_eq!(total, 4);
+        let with_c = areas
+            .iter()
+            .find(|a| a.symbols.contains(&"c".to_string()))
+            .unwrap();
+        assert_eq!(
+            with_c.files,
+            vec!["/r/c.rs", "/r/d.rs"],
+            "tie broken by file name"
+        );
     }
 
     async fn add_edge(

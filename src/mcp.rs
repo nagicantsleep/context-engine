@@ -16,8 +16,16 @@ use tokio::sync::RwLock;
 use rmcp::{
     ErrorData, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    model::{
+        CallToolResult, Content, GetPromptRequestParams, GetPromptResult, ListPromptsResult,
+        ListResourcesResult, PaginatedRequestParams, PromptMessage, PromptMessageRole,
+        ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
+        ServerInfo,
+    },
+    schemars,
+    service::RequestContext,
+    service::RoleServer,
+    tool, tool_handler, tool_router,
 };
 
 pub(crate) mod query_gate;
@@ -428,6 +436,34 @@ pub struct RepoImpactArgs {
     pub max_depth: Option<usize>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ChangesImpactArgs {
+    /// Absolute path to the repository root.
+    pub workspace_full_path: String,
+    /// Unified diff to analyze (as from `git diff` / `git diff --cached`). When
+    /// omitted, the tool runs `git diff HEAD` inside the repo itself. Only the
+    /// ADDED lines are mapped onto the indexed symbols.
+    #[serde(default)]
+    pub git_diff: Option<String>,
+    /// How many caller levels to walk beyond each changed symbol (1 = direct
+    /// callers only). Defaults to 2, capped at 5.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RepoChangesImpactArgs {
+    /// Unified diff to analyze (as from `git diff` / `git diff --cached`). When
+    /// omitted, the tool runs `git diff HEAD` inside this repo. Only the ADDED
+    /// lines are mapped onto the indexed symbols.
+    #[serde(default)]
+    pub git_diff: Option<String>,
+    /// How many caller levels to walk beyond each changed symbol (1 = direct
+    /// callers only). Defaults to 2, capped at 5.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
 // ─── MCP handler ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -466,6 +502,7 @@ impl McpHandler {
             "trace-path",
             "symbol-context",
             "impact",
+            "changes-impact",
         ];
         // `list_repos` is deliberately absent from this gate: it is always
         // exposed (see run_list_repos) — hiding discovery behind the same
@@ -579,6 +616,31 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    /// Map a unified diff's added lines onto indexed symbols and report the
+    /// affected callers (read-only).
+    ///
+    /// Pass `git_diff` to analyze a specific diff, or omit it to have the
+    /// engine run `git diff HEAD` inside the repo. Answers "what does my
+    /// uncommitted change affect?" in one call.
+    #[tool(name = "changes-impact")]
+    async fn changes_impact(
+        &self,
+        Parameters(args): Parameters<ChangesImpactArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let repo = store::normalize_repo_path(&args.workspace_full_path);
+        let text = run_changes_impact(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &repo,
+            args.git_diff.as_deref(),
+            args.max_depth,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[doc = include_str!("prompts/mcp_codebase_retrieval.txt")]
     #[tool(name = "codebase-retrieval")]
     async fn codebase_retrieval(
@@ -634,9 +696,50 @@ impl McpHandler {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            rmcp::model::Implementation::new("context-engine-rs", env!("CARGO_PKG_VERSION")),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
         )
+        .with_server_info(rmcp::model::Implementation::new(
+            "context-engine-rs",
+            env!("CARGO_PKG_VERSION"),
+        ))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, ErrorData> {
+        prompt_get(&request.name)
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        prompt_list()
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        resource_list()
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        resource_read(&request.uri, &settings, &self.data_dir, None).await
     }
 }
 
@@ -692,6 +795,7 @@ impl RepoMcpHandler {
             "trace-path",
             "symbol-context",
             "impact",
+            "changes-impact",
         ];
         // Same deliberate omission of `list_repos` from the gate as the global
         // handler — see run_list_repos.
@@ -792,6 +896,27 @@ impl RepoMcpHandler {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
+    /// Map a unified diff's added lines onto indexed symbols and report the
+    /// affected callers (read-only), with this endpoint's workspace
+    /// pre-bound — no `workspace_full_path` argument.
+    #[tool(name = "changes-impact")]
+    async fn changes_impact(
+        &self,
+        Parameters(args): Parameters<RepoChangesImpactArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        let text = run_changes_impact(
+            &self.repo_dbs,
+            &self.data_dir,
+            &settings,
+            &self.repo_path,
+            args.git_diff.as_deref(),
+            args.max_depth,
+        )
+        .await;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
     #[doc = include_str!("prompts/mcp_codebase_retrieval.txt")]
     #[tool(name = "codebase-retrieval")]
     async fn codebase_retrieval(
@@ -836,12 +961,158 @@ impl RepoMcpHandler {
     }
 }
 
+// ─── Shared prompts + resources (global + per-repo handlers) ─────────────
+
+/// The two guided workflows, served identically by both handlers.
+fn prompt_list() -> Result<ListPromptsResult, ErrorData> {
+    Ok(ListPromptsResult::with_all_items(vec![
+        rmcp::model::Prompt::new(
+            "detect-impact",
+            Some("Pre-commit change analysis: blast radius of the uncommitted diff"),
+            None,
+        ),
+        rmcp::model::Prompt::new(
+            "generate-map",
+            Some("Generate an architecture map (mermaid) from the call graph"),
+            None,
+        ),
+    ]))
+}
+
+fn prompt_get(name: &str) -> Result<GetPromptResult, ErrorData> {
+    Ok(match name {
+        "detect-impact" => GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            "Before committing, run the changes-impact tool for this workspace (omit \
+             git_diff so the engine diffs the working tree), read the reported \
+             affected callers, and summarize the blast radius: which changed symbols \
+             look intentional, which callers may break, and what to check before \
+             committing. Cite symbols exactly as listed.",
+        )]),
+        "generate-map" => GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            "Use list_repos to pick the workspace, then use the trace-path and impact \
+             tools on the main entry symbols to build a concise architecture map: \
+             major modules, how they call each other, and the top files by caller \
+             count. Output mermaid flowchart LR syntax.",
+        )]),
+        other => {
+            return Err(ErrorData::invalid_params(
+                format!("unknown prompt: {other}"),
+                None,
+            ));
+        }
+    })
+}
+
+/// Read-only discovery resources; reading never spawns a worker.
+fn resource_list() -> Result<ListResourcesResult, ErrorData> {
+    Ok(ListResourcesResult::with_all_items(vec![
+        rmcp::model::Resource::new(
+            rmcp::model::RawResource::new("ce://repos", "indexed-repos")
+                .with_description("Configured repos, index state, and per-repo MCP endpoints")
+                .with_mime_type("text/plain"),
+            None,
+        ),
+    ]))
+}
+
+async fn resource_read(
+    uri: &str,
+    settings: &Settings,
+    data_dir: &Path,
+    this_repo: Option<&str>,
+) -> Result<ReadResourceResult, ErrorData> {
+    match uri {
+        "ce://repos" => {
+            let text = run_list_repos(settings, data_dir, this_repo);
+            Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                text, uri,
+            )]))
+        }
+        other => Err(ErrorData::resource_not_found(
+            format!("unknown resource: {other}"),
+            None,
+        )),
+    }
+}
+
+/// Proxy-facing aliases for the shared prompts/resources (the proxy handler
+/// lives in `router::mcp_proxy` and reuses the exact same responses).
+pub(crate) fn proxy_prompt_list() -> Result<ListPromptsResult, ErrorData> {
+    prompt_list()
+}
+
+pub(crate) fn proxy_prompt_get(name: &str) -> Result<GetPromptResult, ErrorData> {
+    prompt_get(name)
+}
+
+pub(crate) fn proxy_resource_list() -> Result<ListResourcesResult, ErrorData> {
+    resource_list()
+}
+
+pub(crate) async fn proxy_resource_read(
+    uri: &str,
+    settings: &Settings,
+    data_dir: &Path,
+    this_repo: Option<&str>,
+) -> Result<ReadResourceResult, ErrorData> {
+    resource_read(uri, settings, data_dir, this_repo).await
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RepoMcpHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            rmcp::model::Implementation::new("context-engine-rs", env!("CARGO_PKG_VERSION")),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_prompts()
+                .enable_resources()
+                .build(),
         )
+        .with_server_info(rmcp::model::Implementation::new(
+            "context-engine-rs",
+            env!("CARGO_PKG_VERSION"),
+        ))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, ErrorData> {
+        prompt_get(&request.name)
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, ErrorData> {
+        prompt_list()
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        resource_list()
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let settings = self.settings.read().await.clone();
+        resource_read(
+            &request.uri,
+            &settings,
+            &self.data_dir,
+            Some(&self.repo_path),
+        )
+        .await
     }
 }
 
@@ -901,7 +1172,11 @@ fn select_empty_or_warming_message(
 /// (unlike the retrieval tools): it is the discovery surface that makes the
 /// gated tools usable under default settings, and it exposes nothing the
 /// router does not already serve through read-only routes.
-pub(crate) fn run_list_repos(settings: &Settings, data_dir: &Path, this_repo: Option<&str>) -> String {
+pub(crate) fn run_list_repos(
+    settings: &Settings,
+    data_dir: &Path,
+    this_repo: Option<&str>,
+) -> String {
     let repos = &settings.repos;
     if repos.is_empty() {
         return "No repos configured yet. A repo is added automatically the first \
@@ -928,10 +1203,27 @@ pub(crate) fn run_list_repos(settings: &Settings, data_dir: &Path, this_repo: Op
         ));
         match crate::router::sidecar::read_sidecar(data_dir, repo) {
             Some(meta) => match meta.last_indexed_at {
-                Some(at) => out.push_str(&format!(
-                    "   index: {} — {} file(s), last indexed {at} (model {})\n",
-                    meta.state, meta.file_count, meta.embedding_model
-                )),
+                Some(at) => {
+                    // Staleness marker: reuse the SAME threshold the MCP
+                    // freshness check uses (`mcp_stale_after_days`), so an
+                    // agent reading `list_repos` sees the same "this index is
+                    // old" signal the query path enforces. Unparsable stamps
+                    // stay unmarked (honest) rather than guessed fresh/stale.
+                    let age_days = chrono::DateTime::parse_from_rfc3339(&at)
+                        .ok()
+                        .map(|ts| (chrono::Utc::now() - ts.with_timezone(&chrono::Utc)).num_days());
+                    let stale_note = match age_days {
+                        Some(days) if days > settings.mcp_stale_after_days as i64 => format!(
+                            " — STALE (>{} days; a query or file change re-indexes it)",
+                            settings.mcp_stale_after_days
+                        ),
+                        _ => String::new(),
+                    };
+                    out.push_str(&format!(
+                        "   index: {} — {} file(s), last indexed {at} (model {}){stale_note}\n",
+                        meta.state, meta.file_count, meta.embedding_model
+                    ));
+                }
                 None => out.push_str("   index: never indexed (querying it triggers indexing)\n"),
             },
             None => {
@@ -1005,7 +1297,12 @@ pub async fn run_codebase_retrieval(
     // 3. Confirm embedding keys are present for key-based providers. Ollama and
     // ONNX run locally without credentials (documented no-key setups).
     let needs_key = !matches!(
-        settings.embedding.provider.trim().to_ascii_lowercase().as_str(),
+        settings
+            .embedding
+            .provider
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
         "ollama" | "onnx"
     );
     if needs_key && settings.embedding.api_keys.is_empty() {
@@ -1456,6 +1753,181 @@ pub(crate) async fn run_impact(
         out.push_str("\n(node budget reached — the caller graph continues beyond this listing)");
     }
     out
+}
+
+/// Shared `changes-impact` runner (global, per-repo, and worker REST
+/// `/api/mcp-tool/changes-impact` handlers): map a unified diff's ADDED lines
+/// onto indexed symbols, then report the affected callers per changed symbol
+/// via the same bounded reverse BFS as `impact`. Read-only, repo-local edges
+/// only (decision 0002). `diff_text = None` means "run `git diff HEAD` in the
+/// repo"; the git path degrades to an actionable error, never a guess.
+pub(crate) async fn run_changes_impact(
+    repo_dbs: &Arc<RwLock<HashMap<String, Surreal<Db>>>>,
+    data_dir: &Path,
+    settings: &Settings,
+    repo: &str,
+    diff_text: Option<&str>,
+    max_depth: Option<usize>,
+) -> String {
+    let diff = match diff_text {
+        Some(d) if !d.trim().is_empty() => d.to_string(),
+        Some(_) => {
+            return "Error: git_diff was empty. Pass the unified diff text, or omit \
+                    git_diff to have the engine run `git diff HEAD` inside the repo."
+                .to_string();
+        }
+        None => match git_diff_head(repo) {
+            Ok(d) if !d.trim().is_empty() => d,
+            Ok(_) => {
+                return "No uncommitted changes: `git diff HEAD` in the repo is empty. \
+                        Stage or write changes first, or pass an explicit `git_diff`."
+                    .to_string();
+            }
+            Err(e) => return format!("Error: {e}"),
+        },
+    };
+
+    let db =
+        match store::get_or_open(repo_dbs, data_dir, repo, settings.repo_generation(repo)).await {
+            Ok(d) => d,
+            Err(e) => return format!("Error: could not open index database: {e}"),
+        };
+    if store::read_db_schema_version(&db).await < 2 {
+        return "Error: this repo's index predates FQN call edges (schema < 2). \
+                Re-index the repo, then retry."
+            .to_string();
+    }
+
+    let mut ranges = crate::query::changed_impact::parse_added_ranges(&diff);
+    if ranges.is_empty() {
+        return "The diff adds no lines (deletions or context only), so no indexed \
+                symbol is directly changed. Removed-call analysis is out of scope \
+                for this tool; use `impact` on the deleted symbols' definitions \
+                instead."
+            .to_string();
+    }
+    // Diff paths are repo-root-relative; the indexed `file` column is the
+    // absolute path the parser saw at index time. Join (and normalize any
+    // `a/`-prefixed form) before querying. Absolute paths pass through.
+    for r in ranges.iter_mut() {
+        let p = r.file.strip_prefix("a/").unwrap_or(&r.file).to_string();
+        if !p.starts_with('/') {
+            r.file = format!("{}/{}", repo.trim_end_matches('/'), p);
+        } else {
+            r.file = p;
+        }
+    }
+    const MAX_DIFF_FILES: usize = 64;
+    let changed =
+        match crate::query::changed_impact::changed_symbols(&db, &ranges, MAX_DIFF_FILES).await {
+            Ok(c) => c,
+            Err(e) => return format!("Error: {e}"),
+        };
+    if changed.is_empty() {
+        return format!(
+            "The diff touches {} added line range(s) but none overlaps an indexed \
+             symbol span. If the change is real, re-index the repo first (the \
+             index may predate the edit).",
+            ranges.len()
+        );
+    }
+
+    let depth = max_depth.unwrap_or(2).clamp(1, 5);
+
+    let mut out = format!(
+        "Changed-symbol impact for {} added line range(s) across the diff:",
+        ranges.len()
+    );
+    let mut total_callers = 0usize;
+    for sym in &changed {
+        let kind_suffix = sym
+            .kind
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .map(|k| format!(" ({k})"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "\n\n● `{}`{kind_suffix} — {}:{}-{}",
+            sym.fqn, sym.file, sym.line_start, sym.line_end
+        ));
+        // Skip the symbol itself in the BFS start (same as `impacted`).
+        let outcome = crate::query::trace_path::impacted(
+            &db,
+            &sym.fqn,
+            depth,
+            crate::query::trace_path::MAX_IMPACT_NODES,
+        )
+        .await;
+        let count: usize = outcome.levels.iter().map(|l| l.len()).sum();
+        if count == 0 {
+            out.push_str(
+                "\n  no callers recorded (entry point, unused, or called only cross-repo)",
+            );
+            continue;
+        }
+        total_callers += count;
+        const MAX_LISTED_PER_SYMBOL: usize = 20;
+        let mut listed = 0usize;
+        for (i, level) in outcome.levels.iter().enumerate() {
+            for node in level {
+                if listed >= MAX_LISTED_PER_SYMBOL {
+                    break;
+                }
+                let hop = if i == 0 { "direct" } else { "via" };
+                out.push_str(&format!(
+                    "\n  - {} `{}`{}{}",
+                    hop,
+                    node.fqn,
+                    if node.inferred { " ~inferred" } else { "" },
+                    if i == 0 {
+                        ""
+                    } else {
+                        " (through an earlier caller)"
+                    },
+                ));
+                listed += 1;
+            }
+            if listed >= MAX_LISTED_PER_SYMBOL {
+                break;
+            }
+        }
+        if count > listed {
+            out.push_str(&format!("\n  … +{} more caller(s)", count - listed));
+        }
+    }
+
+    out.push_str(&format!(
+        "\n\n{} changed symbol(s), {total_callers} affected caller(s) within {depth} level(s). \
+         Edges are this repo's own (cross-repo callers are owned by the caller's \
+         database and are not followed here).",
+        changed.len()
+    ));
+    out
+}
+
+/// Run `git diff HEAD` inside `repo` (no pager, no color, text mode). Fails
+/// with an actionable message when the directory is not a git repo or git is
+/// unavailable — never fabricates a diff.
+fn git_diff_head(repo: &str) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", repo, "diff", "HEAD", "--no-color", "--no-ext-diff"])
+        .output()
+        .map_err(|e| {
+            format!(
+                "could not run `git diff HEAD` in {repo} ({e}). Install git, or pass \
+                 the diff text explicitly via `git_diff`."
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "`git diff HEAD` failed in {repo}: {} (is it a git repository? a commit \
+             must also exist for HEAD to resolve). Pass `git_diff` explicitly to \
+             analyze a specific diff.",
+            stderr.trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Returns a string — never panics, never returns Err.

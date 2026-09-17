@@ -31,9 +31,29 @@ pub struct SetupArgs {
 /// configured, or at least one file errored (failing files are left untouched,
 /// per `mcp_setup`'s never-destructive policy); 2 = usage/environment error.
 pub fn run(args: &SetupArgs) -> i32 {
-    let targets = match mcp_setup::parse_tool_list(&args.tool) {
-        Ok(t) => t,
-        Err(e) => exit_with_error(&e, 2),
+    // `--tool` is explicit; the default `all` consults marker-file detection
+    // first so a repo that only uses Cursor doesn't suddenly grow Claude files.
+    let targets = if args.tool.trim().eq_ignore_ascii_case("all") {
+        let repo_root = std::path::PathBuf::from(store::normalize_repo_path(&args.repo));
+        let detected = mcp_setup::detect_targets(&repo_root);
+        if detected.is_empty() {
+            mcp_setup::Target::ALL.to_vec()
+        } else {
+            println!(
+                "  detected from repo files: {}",
+                detected
+                    .iter()
+                    .map(|t| t.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            detected
+        }
+    } else {
+        match mcp_setup::parse_tool_list(&args.tool) {
+            Ok(t) => t,
+            Err(e) => exit_with_error(&e, 2),
+        }
     };
 
     // Settings home is fixed — the same policy as the router and MCP handler.

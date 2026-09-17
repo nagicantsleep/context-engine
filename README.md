@@ -87,10 +87,12 @@ Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
 | LLM reranking | Reorders candidate chunks with an LLM (OpenAI / Google); optional, can be disabled |
 | Embedded SurrealDB | Stores chunks, symbols, and edges; one datastore per repo |
 | HTTP API + Web UI | Settings management, index explorer, and a query test console |
-| MCP server | `codebase-retrieval`, `file-retrieval`, read-only graph tools `trace-path` / `symbol-context` / `impact`, and the always-on `list_repos` discovery tool |
+| MCP server | `codebase-retrieval`, `file-retrieval` (opt-in), read-only graph tools `trace-path` / `symbol-context` / `impact` / `changes-impact`, guided prompts, and the always-on `list_repos` discovery tool |
 | Secret redaction | API keys and credentials are redacted from chunk content before it reaches the rerank LLM or any tool output |
 | Hybrid retrieval | Lexical fallback fused with vector search via weighted RRF (on by default; `CONTEXT_ENGINE_LEXICAL=0` disables) |
-| Portable graph export | `export-graph` writes nodes, edges, and per-edge confidence to a versioned JSON artifact |
+| Portable graph export | `export-graph` writes nodes, edges, and per-edge confidence to a versioned JSON artifact (or a Mermaid diagram via `--format mermaid`) |
+| Graph view | Self-contained `/graph.html` page renders the bounded cold graph as an interactive SVG — no JS dependencies |
+| Area guidance | `export-areas` derives functional areas from the call graph (connected components, no LLM) and writes per-area agent guidance files |
 | SSE progress stream | Streams live indexing progress events to the UI |
 | Large-repo scaling | Bounded memory and no O(n²) paths — built for Linux/Chromium-scale codebases |
 
@@ -99,12 +101,15 @@ Supported platforms: Linux x64/arm64, macOS arm64, Windows x64.
 
 Both MCP endpoints — the global `/mcp` (pass the absolute `workspace_full_path`
 on every call) and each per-repo `/mcp-repo/<name>` (workspace pre-bound) —
-expose the same tool set. Only `codebase-retrieval` is enabled on fresh
-settings; `file-retrieval`, `trace-path`, `symbol-context`, and `impact` are
-opt-in via `enabled_mcp_tools` in the settings (or the Web UI). `list_repos` is
-always exposed, because discovery must not depend on opt-ins. On the global
-endpoint the repo-backed tools are forwarded to the repo's worker, so output is
-identical to the per-repo endpoints:
+expose the same tool set. `codebase-retrieval` and the three read-only graph
+tools (`trace-path`, `symbol-context`, `impact`, `changes-impact`) are enabled
+on fresh settings; `file-retrieval` remains opt-in via `enabled_mcp_tools` in
+the settings (or the Web UI). `list_repos` is always exposed, because discovery
+must not depend on opt-ins. Both endpoints also serve two guided MCP prompts
+(`detect-impact`, `generate-map`) and a read-only resource `ce://repos` (the
+same listing `list_repos` prints — reading it never spawns a worker). On the
+global endpoint the repo-backed tools are forwarded to the repo's worker, so
+output is identical to the per-repo endpoints:
 
 | Tool | Key arguments | Purpose |
 |------|---------------|---------|
@@ -114,6 +119,7 @@ identical to the per-repo endpoints:
 | `trace-path` | `workspace_full_path`, `from_symbol`, `to_symbol`, optional `direction` (`callees`/`callers`), `max_depth` (default 5, cap 10) | Call path between two symbols; extracted edges outrank inferred ones |
 | `symbol-context` | `workspace_full_path`, `symbol` | Numbered definition source plus a caller/callee summary for one symbol |
 | `impact` | `workspace_full_path`, `symbol`, optional `max_depth` (default 3, cap 8) | Reverse call-graph walk grouped by caller distance, with a most-affected-files summary |
+| `changes-impact` | `workspace_full_path`, optional `git_diff`, optional `max_depth` (default 2, cap 5) | Map a unified diff's ADDED lines onto indexed symbols and list affected callers; without `git_diff` the engine runs `git diff HEAD` inside the repo |
 
 Symbols accept a full FQN (`/abs/file.rs::mod::name`), `file.rs::name`,
 `::name`, or a bare name; ambiguous references return the candidate list
@@ -157,7 +163,11 @@ passes untouched, and redaction is idempotent.
 context-engine setup --repo /abs/path/to/repo [--tool claude,codex,opencode|all] [--port 6699] [--bind 127.0.0.1] [--url https://proxy]
 
 # Export the call graph as a portable JSON artifact (context-engine-graph/v1)
-context-engine export-graph --repo /abs/path/to/repo [--out graph.json] [--max-nodes N] [--max-edges N]
+context-engine export-graph --repo /abs/path/to/repo [--format json|mermaid] [--out graph.json] [--max-nodes N] [--max-edges N]
+
+# Write per-area agent guidance files from the call graph (connected
+# components — deterministic, no LLM, no clustering)
+context-engine export-areas --repo /abs/path/to/repo [--out-dir areas] [--max-area-size N]
 ```
 
 ### Embedding providers

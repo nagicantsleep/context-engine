@@ -27,9 +27,7 @@ use context_engine_rs::{engine_boot, store};
 
 /// Resolve `~/.context-engine` the same way the engine does at boot.
 fn data_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("home dir")
-        .join(".context-engine")
+    dirs::home_dir().expect("home dir").join(".context-engine")
 }
 
 /// Time a single cold `open_db` for `repo_path` at `generation`, returning the

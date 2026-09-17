@@ -212,6 +212,37 @@ async fn cold_graph_returns_empty_placeholder_no_worker() {
     assert!(body["nodes"].as_array().unwrap().is_empty());
 }
 
+/// The standalone graph-view page is served by both the router and the
+/// monolith front-end (same embedded asset), as HTML.
+#[tokio::test]
+async fn graph_html_page_is_served_as_html() {
+    let home = TempDir::new().unwrap();
+    seed_settings(&home, &[r"d:\projects\rust\demo4"]);
+    let addr = start_router(&home).await;
+    let resp = Client::new()
+        .get(format!("http://{addr}/graph.html"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        content_type.starts_with("text/html"),
+        "graph page must be HTML: {content_type}"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Call graph"), "embedded page served");
+    assert!(
+        body.contains("/api/repos/"),
+        "page fetches the bounded cold graph route"
+    );
+}
+
 /// EDGE CASE (the phantom-dir false-positive guard): `/api/index-status` must
 /// report a repo with NO sidecar as `not_indexed` — EVEN IF a RocksDB directory
 /// exists on disk for it. `open_db` creates the dir + runs SCHEMA_DDL on every

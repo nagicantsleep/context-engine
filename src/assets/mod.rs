@@ -89,6 +89,20 @@ pub async fn serve_index() -> impl IntoResponse {
     (headers, html)
 }
 
+/// Serve the standalone graph view (compile-time embedded, no JS deps). It
+/// reads the SAME bounded cold `/api/repos/:id/graph` payload the UI's detail
+/// view uses, so no worker spawn or new data path is introduced — pure
+/// presentation over an existing read-only route.
+pub async fn serve_graph_page() -> impl IntoResponse {
+    let html = include_str!("graph.html");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    (headers, html)
+}
+
 /// Serve a self-hosted ADE font by exact filename. Unknown names → 404 (no
 /// path traversal: the match is against a fixed allow-list, never the FS).
 pub async fn serve_font(

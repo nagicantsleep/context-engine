@@ -17,10 +17,20 @@ use context_engine_rs::config;
 use context_engine_rs::export;
 use context_engine_rs::store;
 
+/// Output format for one `export-graph` invocation.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ExportFormat {
+    /// The versioned JSON artifact (`context-engine-graph/v1`).
+    Json,
+    /// A Mermaid `flowchart LR` diagram renderable by any Mermaid viewer.
+    Mermaid,
+}
+
 /// Arguments for one `export-graph` invocation (parsed from the CLI).
 pub struct ExportGraphArgs {
     pub repo: String,
     pub out: Option<PathBuf>,
+    pub format: ExportFormat,
     pub max_nodes: usize,
     pub max_edges: usize,
     pub data_dir: Option<PathBuf>,
@@ -81,15 +91,20 @@ pub async fn run(args: &ExportGraphArgs) -> i32 {
         Err(e) => return exit_with_error(&e, 1),
     };
 
-    let out_path = args
-        .out
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("graph.json"));
-    let json = match serde_json::to_string_pretty(&export) {
-        Ok(j) => j,
-        Err(e) => return exit_with_error(&format!("serialize export: {e}"), 1),
+    let out_path = args.out.clone().unwrap_or_else(|| {
+        PathBuf::from(match args.format {
+            ExportFormat::Json => "graph.json",
+            ExportFormat::Mermaid => "graph.mmd",
+        })
+    });
+    let payload = match args.format {
+        ExportFormat::Json => match serde_json::to_string_pretty(&export) {
+            Ok(j) => j,
+            Err(e) => return exit_with_error(&format!("serialize export: {e}"), 1),
+        },
+        ExportFormat::Mermaid => export::to_mermaid(&export),
     };
-    if let Err(e) = std::fs::write(&out_path, json.as_bytes()) {
+    if let Err(e) = std::fs::write(&out_path, payload.as_bytes()) {
         return exit_with_error(&format!("write {}: {e}", out_path.display()), 1);
     }
 
