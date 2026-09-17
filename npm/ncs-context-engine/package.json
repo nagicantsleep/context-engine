@@ -1,5 +1,5 @@
 {
-  "name": "context-engine",
+  "name": "ncs-context-engine",
   "version": "0.0.0",
   "description": "Local semantic code context engine — indexes large repos and serves a codebase-retrieval MCP tool",
   "repository": {
@@ -14,9 +14,9 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "context-engine-linux-x64": "0.0.0",
-    "context-engine-linux-arm64": "0.0.0",
-    "context-engine-darwin-arm64": "0.0.0",
-    "context-engine-win32-x64": "0.0.0"
+    "ncs-context-engine-linux-x64": "0.0.0",
+    "ncs-context-engine-linux-arm64": "0.0.0",
+    "ncs-context-engine-darwin-arm64": "0.0.0",
+    "ncs-context-engine-win32-x64": "0.0.0"
   }
 }

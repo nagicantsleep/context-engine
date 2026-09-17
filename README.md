@@ -12,20 +12,20 @@ tag forces npx to fetch the newest published version instead of reusing a
 stale cached one:
 
 ```bash
-npx context-engine@latest
+npx ncs-context-engine@latest
 ```
 
 This boots the HTTP server on port 6699 (web UI at http://127.0.0.1:6699,
 MCP endpoint at `/mcp`). Any CLI flags are forwarded to the binary:
 
 ```bash
-npx context-engine@latest --port 8080 --bind 0.0.0.0
+npx ncs-context-engine@latest --port 8080 --bind 0.0.0.0
 ```
 
 Or install it globally to get a persistent `context-engine` command:
 
 ```bash
-npm install -g context-engine@latest
+npm install -g ncs-context-engine@latest
 context-engine --port 6699
 ```
 

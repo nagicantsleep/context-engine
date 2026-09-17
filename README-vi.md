@@ -12,7 +12,7 @@ sẽ tự động lấy đúng bản binary đã biên dịch sẵn cho nền t�
 cache cũ:
 
 ```bash
-npx context-engine@latest
+npx ncs-context-engine@latest
 ```
 
 Lệnh này khởi động HTTP server ở cổng 6699 (Web UI tại
@@ -20,13 +20,13 @@ http://127.0.0.1:6699, MCP endpoint tại `/mcp`). Mọi cờ CLI đều đượ
 tiếp tới binary:
 
 ```bash
-npx context-engine@latest --port 8080 --bind 0.0.0.0
+npx ncs-context-engine@latest --port 8080 --bind 0.0.0.0
 ```
 
 Hoặc cài đặt toàn cục để có lệnh `context-engine` cố định:
 
 ```bash
-npm install -g context-engine@latest
+npm install -g ncs-context-engine@latest
 context-engine --port 6699
 ```
 

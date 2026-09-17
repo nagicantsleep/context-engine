@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - master
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -43,19 +44,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
-            npm-pkg: context-engine-linux-x64
+            npm-pkg: ncs-context-engine-linux-x64
             bin: context-engine-rs
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
-            npm-pkg: context-engine-linux-arm64
+            npm-pkg: ncs-context-engine-linux-arm64
             bin: context-engine-rs
           - target: aarch64-apple-darwin
             runner: macos-14
-            npm-pkg: context-engine-darwin-arm64
+            npm-pkg: ncs-context-engine-darwin-arm64
             bin: context-engine-rs
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
-            npm-pkg: context-engine-win32-x64
+            npm-pkg: ncs-context-engine-win32-x64
             bin: context-engine-rs.exe
 
     name: Build ${{ matrix.target }}
@@ -155,11 +156,11 @@ jobs:
         run: |
           set -e
           for p in linux-x64 linux-arm64 darwin-arm64; do
-            bin="artifacts/context-engine-$p/bin/context-engine-rs"
+            bin="artifacts/ncs-context-engine-$p/bin/context-engine-rs"
             test -f "$bin" || { echo "::error::missing $bin"; exit 1; }
             chmod +x "$bin"
           done
-          win="artifacts/context-engine-win32-x64/bin/context-engine-rs.exe"
+          win="artifacts/ncs-context-engine-win32-x64/bin/context-engine-rs.exe"
           test -f "$win" || { echo "::error::missing $win"; exit 1; }
 
       - name: Publish packages
@@ -181,7 +182,7 @@ jobs:
 
           MAJOR="${BASE%%.*}"; REST="${BASE#*.}"; MINOR="${REST%%.*}"; PATCH="${REST#*.}"
           VERSION="$BASE"
-          while npm view "context-engine@$VERSION" version >/dev/null 2>&1; do
+          while npm view "ncs-context-engine@$VERSION" version >/dev/null 2>&1; do
             PATCH=$((PATCH + 1))
             VERSION="$MAJOR.$MINOR.$PATCH"
           done
@@ -217,14 +218,14 @@ jobs:
 
           # Platform packages FIRST (so the main pkg's optionalDependencies resolve)...
           for p in linux-x64 linux-arm64 darwin-arm64 win32-x64; do
-            DIR="artifacts/context-engine-$p"
+            DIR="artifacts/ncs-context-engine-$p"
             stamp "$DIR"
             publish_if_new "$DIR"
           done
 
           # ...main package LAST.
-          stamp "npm/context-engine"
-          publish_if_new "npm/context-engine"
+          stamp "npm/ncs-context-engine"
+          publish_if_new "npm/ncs-context-engine"
 
       - name: Commit version bump back to master
         if: steps.publish.outputs.version != ''
