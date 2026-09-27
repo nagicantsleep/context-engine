@@ -4,7 +4,7 @@ Date: 2026-09-27
 
 ## Status
 
-Active
+Completed
 
 ## Outcome
 
@@ -74,18 +74,27 @@ Out of scope:
 
 ## Progress
 
-- [ ] Plan committed on the working branch
-- [ ] Merge started, conflicts enumerated
-- [ ] Cargo.toml/Cargo.lock resolved (0.1.75)
-- [ ] src/assets/mod.rs resolved
-- [ ] src/mcp.rs resolved
-- [ ] src/mcp_session_store.rs resolved
-- [ ] src/router/mod.rs, src/router/routes.rs, src/server.rs resolved
-- [ ] tests/router_integration.rs resolved
-- [ ] cargo check --all-targets clean
-- [ ] cargo test green
-- [ ] Merge commit; branch fast-forwarded into master
-- [ ] Plan moved to docs/plans/completed/
+- [x] Plan committed on the working branch
+- [x] Merge started, conflicts enumerated (9 paths, as predicted)
+- [x] Cargo.toml/Cargo.lock resolved (0.1.75; upstream's
+      `Win32_Security_Authorization` feature auto-merged)
+- [x] src/assets/mod.rs resolved (local superset: `serve_graph_page`)
+- [x] src/mcp.rs resolved (5 blocks: upstream `with_progress_heartbeat`
+      wrapper + local extra args; dropped duplicate `service::RoleServer`
+      import)
+- [x] src/mcp_session_store.rs resolved (doc: per-process persistent stores;
+      upstream disk-persist section kept verbatim)
+- [x] src/router/mod.rs resolved (router `/mcp` now uses upstream's
+      `with_persist` store; local fresh-store override removed)
+- [x] src/router/routes.rs + src/server.rs resolved (kept `graph.html` route)
+- [x] tests/router_integration.rs resolved (local tests kept; upstream
+      `initialize_mcp`/`post_mcp_ping` helpers appended — their caller test
+      auto-merged at the top of the file)
+- [x] cargo check --all-targets clean (pre-existing warnings only)
+- [x] cargo test green (897 lib + 16 integration + 4 mcp_session_restore +
+      19 router_integration; true `cargo test` exit 0)
+- [x] Merge commit; branch fast-forwarded into master
+- [x] Plan moved to docs/plans/completed/
 
 ## Decisions
 
@@ -94,6 +103,16 @@ Out of scope:
   a fresh number avoids ambiguous tags/packages.
 - 2026-09-27: merge uses a local `upstream-snapshot` branch ref instead of
   adding a persistent git remote (no config mutation).
+- 2026-09-27: router global `/mcp` adopts upstream's persistent
+  `BoundedSessionStore::with_persist` and the local fresh in-memory store
+  override is removed — upstream's ed377ea is the evolved form of the same
+  intent (store present + survives process restart), and local's proxy
+  handler signature (home/data dirs for router-side list_repos) is kept.
+- 2026-09-27: `src/mcp.rs` tool handlers keep local's extra call args
+  (`cross_repo`, `max_tokens`) inside upstream's
+  `with_progress_heartbeat(ctx.peer, &ctx.meta, ctx.ct, MCP_PROGRESS_HEARTBEAT, …)`
+  wrapper; local's `service::RoleServer` import is dropped because the merged
+  import tree already brings `rmcp::RoleServer` (same type) from upstream.
 
 ## Validation
 
@@ -101,3 +120,34 @@ Out of scope:
   `tests/router_integration.rs` cases pass alongside local cases.
 - Integration or end-to-end proof: full `cargo test`.
 - Repository-required checks: `cargo check --all-targets`.
+
+## Result
+
+Completed 2026-09-27 (branch `merge-upstream-20260927`, merge commit
+`4cb4a82`, then fast-forwarded into `master`).
+
+Verified outcome:
+
+- Upstream `ff7410e` (progress heartbeats), `ed377ea` (persistent MCP
+  sessions), and the v0.1.74 release state are merged; local MCP proxy/graph
+  surface and hybrid-fusion work intact; version 0.1.75.
+- `cargo check --all-targets` clean (pre-existing warnings only).
+- Full `cargo test` exit 0: 897 lib + 16 integration + 4
+  mcp_session_restore + 19 router_integration passed, including upstream's
+  new session-restore and heartbeat tests running against the merged
+  router store wiring.
+
+Limitations:
+
+- `indexing::load_repos_tests::incremental_window_does_not_search_stale_resident_shard`
+  failed once under full-suite parallel load (precondition assertion at
+  load_repos_tests.rs:617), then passed 3/3 isolated and in the final full
+  run. The merge touches no `src/indexing/` file (verified via
+  `git diff HEAD --name-only -- src/indexing/` = empty), so this is a
+  pre-existing local flake, not a merge regression. Worth a dedicated
+  deflake pass later.
+
+Follow-up (not attempted here):
+
+- Push `master` to `origin` (user's call).
+- npm/crates publish for 0.1.75 was not requested.
