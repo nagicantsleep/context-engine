@@ -25,7 +25,7 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 
-use crate::mcp_session_store::{BoundedSessionStore, SharedSessionStore};
+use crate::mcp_session_store::{BoundedSessionStore, SharedSessionStore, mcp_sessions_dir};
 
 type RepoMcpService = StreamableHttpService<RepoMcpHandler, LocalSessionManager>;
 
@@ -221,7 +221,9 @@ fn build_router_inner(
         repo_dbs: repo_dbs.clone(),
         settings: settings.clone(),
         repo_mcp_services: Arc::new(RwLock::new(HashMap::new())),
-        mcp_session_store: Arc::new(BoundedSessionStore::new()),
+        mcp_session_store: Arc::new(BoundedSessionStore::with_persist(mcp_sessions_dir(
+            &data_dir,
+        ))),
         conversations: Arc::new(crate::chat::ConversationStore::new()),
         cross_repo,
         worker_owned_repo,

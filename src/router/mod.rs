@@ -43,6 +43,7 @@ use crate::config::{
     Settings, default_data_dir, default_embeddings_dir, ensure_dir_and_load, ensure_machine_id,
 };
 use crate::engine_boot::set_rocksdb_memory_bounds;
+use crate::mcp_session_store::{BoundedSessionStore, mcp_sessions_dir};
 use crate::store::normalize_repo_path;
 
 use self::jobobject::JobObject;
@@ -169,9 +170,12 @@ pub async fn build_router_app(opts: RouterBootOptions) -> Result<(Router, ProxyC
     let mcp_proxy_ctx = state.proxy.clone();
     let enabled_tools = settings.enabled_mcp_tools.clone();
     let bind_host = opts.bind.clone();
-    let mut mcp_config = {
+    let mcp_session_store = Arc::new(BoundedSessionStore::with_persist(mcp_sessions_dir(
+        &data_dir,
+    )));
+    let mcp_config = {
         let is_loopback = matches!(bind_host.as_str(), "127.0.0.1" | "localhost" | "::1");
-        if is_loopback {
+        let mut base = if is_loopback {
             StreamableHttpServerConfig::default()
         } else {
             StreamableHttpServerConfig::default().with_allowed_hosts(vec![
@@ -180,11 +184,14 @@ pub async fn build_router_app(opts: RouterBootOptions) -> Result<(Router, ProxyC
                 "127.0.0.1".to_string(),
                 "::1".to_string(),
             ])
-        }
+        };
+        // Same restore path as the worker: idle-drop the live worker, keep the
+        // store entry (now on disk too) so the next stale request restores
+        // instead of 404-ing. Without this, router `/mcp` is store-less and
+        // Claude Code sees "session expired" after rmcp's 5 min keep_alive.
+        base.session_store = Some(mcp_session_store);
+        base
     };
-    mcp_config.session_store = Some(Arc::new(
-        crate::mcp_session_store::BoundedSessionStore::new(),
-    ));
     // list_repos on the global /mcp is served router-side from these dirs, so
     // the proxy handler needs them even though every repo-backed call is
     // forwarded to a worker.

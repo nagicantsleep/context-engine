@@ -95,6 +95,29 @@ async fn router_serves_config_natively_without_engine() {
     assert!(body.get("repos").is_some(), "config has repos field");
 }
 
+/// Router `/mcp` must persist initialize_params so a router restart (or the
+/// 5 min keep_alive drop) restores on POST instead of 404.
+#[tokio::test]
+async fn router_mcp_post_restores_after_new_process() {
+    let home = TempDir::new().unwrap();
+    seed_settings(&home, &[]);
+    let client = Client::new();
+
+    let session_id = {
+        let addr = start_router(&home).await;
+        initialize_mcp(&client, addr).await
+    };
+
+    // New router process, same data_dir (persist files survive).
+    let addr = start_router(&home).await;
+    let (status, body) = post_mcp_ping(&client, addr, &session_id).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "router /mcp must restore the persisted session on POST, got {status} body={body:?}"
+    );
+}
+
 #[tokio::test]
 async fn repo_list_reflects_sidecar() {
     let home = TempDir::new().unwrap();
@@ -861,4 +884,55 @@ async fn cross_repo_chunk_owned_repo_proxies_to_owning_worker() {
 
     // Deterministic teardown: don't wait out the worker's 300s idle window.
     proxy.registry.kill_all().await;
+}
+async fn initialize_mcp(client: &Client, addr: SocketAddr) -> String {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "router-restore-test", "version": "1.0.0" }
+        }
+    });
+    let res = client
+        .post(format!("http://{addr}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(&body)
+        .send()
+        .await
+        .expect("initialize");
+    assert!(
+        res.status().is_success(),
+        "initialize should succeed, got {}",
+        res.status()
+    );
+    res.headers()
+        .get("mcp-session-id")
+        .expect("server must assign a session id")
+        .to_str()
+        .expect("ascii session id")
+        .to_owned()
+}
+
+async fn post_mcp_ping(
+    client: &Client,
+    addr: SocketAddr,
+    session_id: &str,
+) -> (reqwest::StatusCode, String) {
+    let res = client
+        .post(format!("http://{addr}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", session_id)
+        .header("mcp-protocol-version", "2024-11-05")
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":2,"method":"ping"}))
+        .send()
+        .await
+        .expect("ping");
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    (status, text)
 }
