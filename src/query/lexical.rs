@@ -955,4 +955,165 @@ mod tests {
         let empty = lexical_candidates(&map, "what is the", Some("/test/lexical_filter"), 5).await;
         assert!(empty.is_empty());
     }
+
+    /// CONTAINS-scan latency scaling profile — the recorded FTS-deferral
+    /// trigger evidence (gap-closure P2.12: "revisit only when a repo-scale
+    /// latency profile shows the scan in the tail"). Ignored by default; run
+    /// explicitly with:
+    ///   cargo test --release --lib lexical_scan_scaling_microbench -- --ignored --nocapture
+    ///
+    /// Inserts synthetic chunks with realistic code-shaped content and times
+    /// the EXACT per-term scan `lexical_candidates` issues (same SQL, same
+    /// LIMIT) with 10 mixed terms × 3 rounds per corpus size. Store-level by
+    /// design: the scan cost is provider-independent, so no embeddings are
+    /// involved.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "microbench: run explicitly with --ignored --nocapture"]
+    async fn lexical_scan_scaling_microbench() {
+        let home = TempDir::new().unwrap();
+        let repo = "/test/scan_scaling";
+        let db = open_db(home.path(), repo, 0).await.unwrap();
+
+        let code_line = "pub fn fetch_chunk_content(q: &Query) -> Result<Page> { \
+             let page = self.store.load(q).await?; page.normalize().dedup() }";
+        // Every 8th row carries the probe terms so pools are non-empty; the
+        // rest are same-shape filler (realistic worst case: full-table scan).
+        // Sizes grow incrementally so each checkpoint times a TRUE corpus of
+        // that size.
+        let sizes = [1_000usize, 5_000, 20_000, 50_000];
+        let sql = "SELECT file, line_start, line_end, content, symbol_ref FROM chunk \
+             WHERE string::lowercase(content) CONTAINS string::lowercase($t) \
+             OR string::lowercase(file) CONTAINS string::lowercase($t) LIMIT $limit";
+        let limit = lexical_limit(10) as i64;
+        // Hit-path terms appear in every row (LIMIT short-circuits the scan —
+        // the best case). Miss-path terms match NO row, forcing the scan to
+        // traverse the whole table before proving absence — the worst case the
+        // FTS verdict must rest on.
+        let hit_terms = [
+            "fetch", "chunk", "content", "normalize", "store", "load", "page",
+            "query", "result", "marker",
+        ];
+        let miss_terms = ["zzznohitprobe", "qqabsentterm"];
+        let mut inserted: usize = 0;
+        let mut total_rows: usize = 0;
+        for &size in &sizes {
+            while inserted < size {
+                let end = (inserted + 500).min(size);
+                let mut rows: Vec<serde_json::Value> = Vec::with_capacity(end - inserted);
+                for i in inserted..end {
+                    let marker = if i % 8 == 0 {
+                        format!("// fetch_chunk_content marker {i}")
+                    } else {
+                        format!("// filler {i}")
+                    };
+                    rows.push(serde_json::json!({
+                        "file": format!("{repo}/src/mod{i}.rs"),
+                        "line_start": 1,
+                        "line_end": 30,
+                        "content": format!("{code_line} {marker}"),
+                        "symbol_ref": serde_json::Value::Null,
+                    }));
+                }
+                db.query("INSERT INTO chunk $rows")
+                    .bind(("rows", rows))
+                    .await
+                    .expect("insert synthetic chunk batch");
+                inserted = end;
+            }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn profile_scan(
+            db: &Surreal<Db>,
+            sql: &str,
+            limit: i64,
+            size: usize,
+            label: &'static str,
+            terms: &[&str],
+            total: &mut usize,
+        ) {
+            let mut samples: Vec<f64> = Vec::new();
+            for _ in 0..3 {
+                for t in terms {
+                    let started = std::time::Instant::now();
+                    let batch: Vec<LexicalRow> = db
+                        .query(sql)
+                        .bind(("t", t.to_string()))
+                        .bind(("limit", limit))
+                        .await
+                        .expect("scan query")
+                        .take(0)
+                        .expect("scan rows");
+                    samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                    *total = (*total).max(batch.len());
+                }
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
+            let p95 = samples[(samples.len() as f64 * 0.95) as usize % samples.len()];
+            println!(
+                "scan_scaling corpus={size:>6} rows [{label:>9}]: mean {mean:7.2} ms  p95 {p95:7.2} ms  max {:7.2} ms",
+                samples[samples.len() - 1]
+            );
+        }
+        profile_scan(&db, sql, limit, size, "hit/limit", &hit_terms, &mut total_rows).await;
+        profile_scan(&db, sql, limit, size, "miss/full", &miss_terms, &mut total_rows).await;
+        }
+
+        // FTS SPIKE (measure-only, per the P2.12 deferral's measure-first
+        // mandate): at the largest checkpoint, define a SEARCH index over
+        // chunk.content and time the equivalent MATCH query. This is NOT the
+        // adoption path (CONTAINS is substring semantics; MATCH is token
+        // semantics — an edgengram analyzer only approximates it); it bounds
+        // what an indexed path could win on the miss/full worst case.
+        {
+            let build_started = std::time::Instant::now();
+            if let Err(e) = db
+                .query("DEFINE ANALYZER ce_scan_spike TOKENIZERS blank,class FILTERS lowercase,edgengram(2,16)")
+                .await
+            {
+                println!("scan_scaling FTS spike: define analyzer FAILED: {e}");
+                return;
+            }
+            if let Err(e) = db
+                .query("DEFINE INDEX ce_scan_spike_idx ON TABLE chunk COLUMNS content SEARCH ANALYZER ce_scan_spike")
+                .await
+            {
+                println!("scan_scaling FTS spike: define index FAILED: {e}");
+                return;
+            }
+            println!(
+                "scan_scaling FTS spike: analyzer+index build over 50k rows took {:.1} s",
+                build_started.elapsed().as_secs_f64()
+            );
+            let fts_sql = "SELECT file, line_start, line_end, content, symbol_ref FROM chunk \
+                 WHERE content @@ $t LIMIT $limit";
+            let mut samples: Vec<f64> = Vec::new();
+            for _ in 0..3 {
+                for t in miss_terms {
+                    let started = std::time::Instant::now();
+                    match db
+                        .query(fts_sql)
+                        .bind(("t", t.to_string()))
+                        .bind(("limit", limit))
+                        .await
+                    {
+                        Ok(mut r) => {
+                            let _rows: Vec<LexicalRow> = r.take(0).unwrap_or_default();
+                        }
+                        Err(e) => {
+                            println!("scan_scaling FTS spike: MATCH query FAILED: {e}");
+                            return;
+                        }
+                    }
+                    samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
+            println!(
+                "scan_scaling corpus= 50000 rows [fts/miss  ]: mean {mean:7.2} ms (search-indexed miss path)"
+            );
+        }
+        assert!(total_rows > 0, "probe terms must match the marked rows");
+    }
 }
