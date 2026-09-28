@@ -934,6 +934,9 @@ async fn post_ignore_file(
     };
 
     // 1. Delete file data from DB (includes file_meta, chunks, symbols, edges, raw_edge).
+    // A first-boot migration chain rewriting rows concurrently would defeat the
+    // delete (lost-delete), so drain it first.
+    store::wait_for_migration(&repo).await;
     if let Err(e) = store::ops::delete_files_data_bulk(&db, std::slice::from_ref(&file_path)).await
     {
         return (
@@ -1099,7 +1102,9 @@ async fn post_ignore_files(
                 .into_response();
         }
 
-        // 2. Delete this page's data from the DB.
+        // 2. Delete this page's data from the DB. Same migration drain as the
+        // single-file delete: never let a page-scan UPDATE defeat a delete.
+        store::wait_for_migration(&repo).await;
         if let Err(e) = store::ops::delete_files_data_bulk(&db, &abs_paths).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

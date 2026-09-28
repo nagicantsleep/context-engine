@@ -1086,7 +1086,10 @@ impl IndexPipeline {
             .context("full_rebuild: clear committed embedding identity before delete")?;
 
         // Delete everything first (crash-safe: file_meta is the commit marker,
-        // written per-file only after its chunks are durable).
+        // written per-file only after its chunks are durable). A first-boot
+        // migration chain rewriting rows concurrently would defeat these
+        // deletes (lost-delete), so it is drained first.
+        crate::store::wait_for_migration(&self.repo).await;
         delete_all_data(db)
             .await
             .context("full_rebuild: delete_all_data")?;
@@ -1277,6 +1280,9 @@ impl IndexPipeline {
             ))
             .await
             .context("incremental_run: clear committed readiness before delete")?;
+        // Drain any in-flight migration chain before destructive DML: its
+        // page-scan UPDATEs would otherwise defeat these deletes (lost-delete).
+        crate::store::wait_for_migration(&self.repo).await;
         delete_files_data_incremental(db, &all_affected)
             .await
             .context("incremental_run: delete_files_data_incremental")?;

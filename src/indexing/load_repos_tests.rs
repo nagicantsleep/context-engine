@@ -611,14 +611,35 @@ async fn incremental_window_does_not_search_stale_resident_shard() {
     let db = store::get_or_open(&repo_dbs, home.path(), &repo, 0)
         .await
         .expect("open repo DB");
+    // Mirror the production guard: destructive DML drains any in-flight
+    // migration chain first — its page-scan UPDATEs would otherwise defeat
+    // this delete (lost-delete regression under parallel suite load).
+    store::wait_for_migration(&repo).await;
     store::ops::delete_files_data_incremental(&db, std::slice::from_ref(&file))
         .await
         .expect("simulate incremental delete phase");
-    assert_eq!(
-        store::ops::count_chunks(&db).await.expect("count chunks"),
-        0,
-        "precondition: incremental rebuild deleted affected chunk rows"
-    );
+    {
+        // Fingerprint any surviving chunk row without selecting the embedding
+        // itself (bytes rows break JSON deserialization): emb_is_array=false +
+        // emb_is_bytes=true identifies a row REWRITTEN by the v4→v5 migration,
+        // while emb_is_array=true identifies an untouched seeded row.
+        let survivors: Vec<serde_json::Value> = db
+            .query(
+                "SELECT type::string(id) AS id, file, line_start, line_end, content, \
+                 type::is::array(embedding) AS emb_is_array, \
+                 type::is::bytes(embedding) AS emb_is_bytes \
+                 FROM chunk",
+            )
+            .await
+            .expect("fingerprint surviving chunks")
+            .take(0)
+            .expect("take surviving chunks");
+        let count = store::ops::count_chunks(&db).await.expect("count chunks");
+        assert_eq!(
+            count, 0,
+            "precondition: incremental rebuild deleted affected chunk rows; survivors: {survivors:?}"
+        );
+    }
 
     let settings = crate::config::Settings {
         repos: vec![repo.clone()],

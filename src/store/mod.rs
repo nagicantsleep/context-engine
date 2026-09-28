@@ -1235,6 +1235,59 @@ fn open_gate(repo: &str) -> Arc<Mutex<()>> {
 static MIGRATION_TASKS: LazyLock<StdMutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+/// Await any in-flight background migration chain for `repo` before mutating
+/// its persisted data.
+///
+/// WHY (lost-delete race): the migration chain rewrites rows it page-scanned
+/// (v1→v2 `calls` backfill, v4→v5 embedding pack) with by-id UPDATEs. When
+/// destructive DML deletes one of those rows concurrently, the UPDATE's write
+/// can land after the DELETE and the deleted row SURVIVES with
+/// migration-encoded content — observed as a chunk surviving
+/// `delete_files_data_incremental` with a packed-bytes embedding. Destructive
+/// DML therefore waits for the chain to finish first; migrations run once per
+/// DB (version-stamped), so the wait is bounded and free once the stamp exists.
+///
+/// Polls `is_finished()` instead of awaiting the JoinHandle directly so the
+/// caller never depends on which runtime spawned the task.
+pub async fn wait_for_migration(repo: &str) {
+    let repo = normalize_repo_path(repo);
+    loop {
+        enum MigrationState {
+            Absent,
+            Running,
+            Finished,
+        }
+        let state = {
+            let tasks = MIGRATION_TASKS.lock().unwrap();
+            match tasks.get(&repo) {
+                None => MigrationState::Absent,
+                Some(h) if h.is_finished() => MigrationState::Finished,
+                Some(_) => MigrationState::Running,
+            }
+        };
+        match state {
+            MigrationState::Absent => return,
+            MigrationState::Running => {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            MigrationState::Finished => {
+                // Reap via remove (JoinHandle is not Clone). Removing a finished
+                // entry is safe: the task's own self-deregistration is a no-op
+                // afterwards (see maybe_spawn_migration). Awaiting a FINISHED
+                // handle resolves immediately even across runtimes — no wakeup
+                // dependency on the spawning scheduler. The lock guard is bound
+                // to a let so it drops BEFORE the await (holding a std sync
+                // guard across .await makes the caller's future non-Send).
+                let reaped = MIGRATION_TASKS.lock().unwrap().remove(&repo);
+                if let Some(h) = reaped {
+                    let _ = h.await;
+                }
+                return;
+            }
+        }
+    }
+}
+
 /// Abort and await any in-flight migration task for `repo`, dropping the
 /// migration's `Surreal<Db>` clone so the RocksDB LOCK can be released before
 /// directory removal. No-op if no migration is running (or it already finished
