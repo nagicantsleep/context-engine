@@ -990,8 +990,16 @@ mod tests {
         // traverse the whole table before proving absence — the worst case the
         // FTS verdict must rest on.
         let hit_terms = [
-            "fetch", "chunk", "content", "normalize", "store", "load", "page",
-            "query", "result", "marker",
+            "fetch",
+            "chunk",
+            "content",
+            "normalize",
+            "store",
+            "load",
+            "page",
+            "query",
+            "result",
+            "marker",
         ];
         let miss_terms = ["zzznohitprobe", "qqabsentterm"];
         let mut inserted: usize = 0;
@@ -1021,42 +1029,60 @@ mod tests {
                 inserted = end;
             }
 
-        #[allow(clippy::too_many_arguments)]
-        async fn profile_scan(
-            db: &Surreal<Db>,
-            sql: &str,
-            limit: i64,
-            size: usize,
-            label: &'static str,
-            terms: &[&str],
-            total: &mut usize,
-        ) {
-            let mut samples: Vec<f64> = Vec::new();
-            for _ in 0..3 {
-                for t in terms {
-                    let started = std::time::Instant::now();
-                    let batch: Vec<LexicalRow> = db
-                        .query(sql)
-                        .bind(("t", t.to_string()))
-                        .bind(("limit", limit))
-                        .await
-                        .expect("scan query")
-                        .take(0)
-                        .expect("scan rows");
-                    samples.push(started.elapsed().as_secs_f64() * 1000.0);
-                    *total = (*total).max(batch.len());
+            #[allow(clippy::too_many_arguments)]
+            async fn profile_scan(
+                db: &Surreal<Db>,
+                sql: &str,
+                limit: i64,
+                size: usize,
+                label: &'static str,
+                terms: &[&str],
+                total: &mut usize,
+            ) {
+                let mut samples: Vec<f64> = Vec::new();
+                for _ in 0..3 {
+                    for t in terms {
+                        let started = std::time::Instant::now();
+                        let batch: Vec<LexicalRow> = db
+                            .query(sql)
+                            .bind(("t", t.to_string()))
+                            .bind(("limit", limit))
+                            .await
+                            .expect("scan query")
+                            .take(0)
+                            .expect("scan rows");
+                        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                        *total = (*total).max(batch.len());
+                    }
                 }
+                samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
+                let p95 = samples[(samples.len() as f64 * 0.95) as usize % samples.len()];
+                println!(
+                    "scan_scaling corpus={size:>6} rows [{label:>9}]: mean {mean:7.2} ms  p95 {p95:7.2} ms  max {:7.2} ms",
+                    samples[samples.len() - 1]
+                );
             }
-            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
-            let p95 = samples[(samples.len() as f64 * 0.95) as usize % samples.len()];
-            println!(
-                "scan_scaling corpus={size:>6} rows [{label:>9}]: mean {mean:7.2} ms  p95 {p95:7.2} ms  max {:7.2} ms",
-                samples[samples.len() - 1]
-            );
-        }
-        profile_scan(&db, sql, limit, size, "hit/limit", &hit_terms, &mut total_rows).await;
-        profile_scan(&db, sql, limit, size, "miss/full", &miss_terms, &mut total_rows).await;
+            profile_scan(
+                &db,
+                sql,
+                limit,
+                size,
+                "hit/limit",
+                &hit_terms,
+                &mut total_rows,
+            )
+            .await;
+            profile_scan(
+                &db,
+                sql,
+                limit,
+                size,
+                "miss/full",
+                &miss_terms,
+                &mut total_rows,
+            )
+            .await;
         }
 
         // FTS SPIKE (measure-only, per the P2.12 deferral's measure-first
